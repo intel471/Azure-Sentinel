@@ -1,4 +1,4 @@
-# Azure DDoS Protection
+# DORA Compliance
 
 ## Solution Information
 
@@ -6,10 +6,10 @@
 |------------------------|-------|
 | **Publisher** | Microsoft Corporation |
 | **Support Tier** | Microsoft |
-| **Support Link** | [https://support.microsoft.com](https://support.microsoft.com) |
+| **Support Link** | [https://support.microsoft.com/](https://support.microsoft.com/) |
 | **Categories** | domains |
-| **First Published** | 2022-05-13 |
-| **Solution Folder** | [https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Azure%20DDoS%20Protection](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Azure%20DDoS%20Protection) |
+| **First Published** | 2025-10-08 |
+| **Solution Folder** | [https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/DORA%20Compliance](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/DORA%20Compliance) |
 
 ## Data Connectors
 

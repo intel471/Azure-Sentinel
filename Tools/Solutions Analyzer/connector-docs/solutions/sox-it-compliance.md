@@ -1,4 +1,4 @@
-# Azure DDoS Protection
+# SOX IT Compliance
 
 ## Solution Information
 
@@ -8,8 +8,8 @@
 | **Support Tier** | Microsoft |
 | **Support Link** | [https://support.microsoft.com](https://support.microsoft.com) |
 | **Categories** | domains |
-| **First Published** | 2022-05-13 |
-| **Solution Folder** | [https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Azure%20DDoS%20Protection](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/Azure%20DDoS%20Protection) |
+| **First Published** | 2025-12-11 |
+| **Solution Folder** | [https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/SOX%20IT%20Compliance](https://github.com/Azure/Azure-Sentinel/blob/master/Solutions/SOX%20IT%20Compliance) |
 
 ## Data Connectors
 
