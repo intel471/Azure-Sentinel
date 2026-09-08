@@ -2,65 +2,148 @@
     "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
     "contentVersion": "1.0.0.0",
     "metadata": {
-        "title": "Intel 471 Credential Intelligence to Sentinel (iteration 1)",
-        "description": "ITERATION 1 - single manual call. Calls the Verity credential-occurrences stream exactly once with the from and size values you supply, maps the results and writes them to the Intel471CredentialOccurrences_CL custom table. No cursor, no paging, no Key Vault - credentials are template parameters. NOTE ON TIMESTAMPS: TimeGenerated is the time this playbook ingested the row, NOT the time the credential was observed - Azure Monitor overwrites any TimeGenerated older than 2 days with the receipt time, which would make the column mean different things for fresh and backfilled data. Query LastUpdatedTime, FirstSeenTime or LastSeenTime for when the credential was actually seen.",
+        "title": "Intel 471 Credential Intelligence to Sentinel",
+        "description": "This playbook ingests compromised credential occurrences from Intel 471's Verity 471 Credentials API into a custom Microsoft Sentinel table using the Azure Monitor Logs Ingestion API. Each row is one sighting of a credential, carrying the login, the monitored domain, password strength and complexity metadata, the credential set it came from, and the information stealer and infected host that captured it. Plaintext passwords are never ingested. NOTE ON TIMESTAMPS: TimeGenerated is the time this playbook ingested the row, not the time the credential was observed - query LastUpdatedTime, FirstSeenTime or LastSeenTime for that. See the playbook README for the full column reference.",
+        "prerequisites": [
+            "1. An active account in the Verity 471 platform, which is available as part of Intel 471's subscriptions. For more information, please contact sales@intel471.com. Credential Intelligence must be included in your subscription and the domains you want monitored must already be registered with Intel 471.",
+            "2. API credentials. The Client ID and Client Secret issued in the Intel 471 portal - the Client ID is used as the API user name and the Client Secret as the API key.",
+            "3. Pre-existing [Key Vault](https://docs.microsoft.com/azure/key-vault/general/basic-concepts) for securely storing API credentials. By default the playbook reads the secrets `VerityUserNameSentinel` and `VerityAPIKeySentinel`. The credentials are never entered on the deployment screen - store them in the Key Vault first. If your secrets use different names, pass those names in the optional `KeyVaultUsernameSecretName` and `KeyVaultApiKeySecretName` parameters.",
+            "4. Pre-existing [Storage account](https://learn.microsoft.com/azure/storage/common/storage-account-overview) with a blob container already created, for persisting the stream cursor between runs. It can be the same container the Intel 471 Malware Intelligence playbook uses - the blob names do not collide.",
+            "5. The name and resource group of the Log Analytics workspace that will hold the data. This playbook creates the custom table, the data collection endpoint and the data collection rule itself; nothing needs to be prepared in the workspace beforehand."
+        ],
+        "postDeployment": [
+            "1. Grant the logic app read access to the Key Vault secrets. If the Key Vault uses the `Azure role-based access control` permission model, go to the Key Vault \u2192 `Access control (IAM)` \u2192 `+ Add` \u2192 `Add role assignment`, choose `Key Vault Secrets User`, then `+ Select members`, search for Intel 471 and select the newly created logic app. If the Key Vault uses the `Vault access policy` permission model instead, go to the Key Vault \u2192 `Access policies` \u2192 `+ Create` and grant the logic app the `Get` secret permission - the role assignment has no effect on vaults in that mode.",
+            "2. Go to the storage account selected during deployment, open `Access control (IAM)` and add a role assignment as in step 1., granting the logic app the `Storage Blob Data Contributor` role. This is required - the playbook authenticates to Blob storage with its system-assigned managed identity, and without this role every run fails.",
+            "3. Go to the data collection rule created by this deployment (`dcr-intel471-creds`), open `Access control (IAM)` and add a role assignment as in step 1., granting the logic app the `Monitoring Metrics Publisher` role. This is required - without it every run fails at the PostToDcr step with HTTP 403. Azure documents up to 30 minutes for this assignment to take effect, so wait before concluding it did not work.",
+            "4. Optionally change the schedule's frequency in `Recurrence` block (the first one).",
+            "5. Optionally add Verity API filters - for example `affiliation_group`, `password_strength` or `password_length_gte` - to the `payload` variable in the `InitVariables` action. Changing filters invalidates the stored cursor; the playbook detects this and re-ingests with an overlap. See the playbook README."
+        ],
+        "lastUpdateTime": "2026-09-08T00:00:00.000Z",
+        "entities": [
+            "account",
+            "ip",
+            "host"
+        ],
+        "tags": [
+            "ThreatIntelligence"
+        ],
         "author": {
             "name": "Intel 471, Inc."
-        }
+        },
+        "support": {
+            "name": "Intel 471",
+            "email": "support@intel471.com",
+            "tier": "Partner",
+            "link": "https://intel471.com/company/contact"
+        },
+        "releaseNotes": [
+            {
+                "version": "1.0",
+                "title": "Intel 471 Credential Intelligence to Sentinel",
+                "notes": [
+                    "Initial version.",
+                    "Ingests credential occurrences from the Verity 471 Credentials API into the Intel471CredentialOccurrences_CL custom table through the Azure Monitor Logs Ingestion API. The custom table, data collection endpoint and data collection rule are all created by this template.",
+                    "Plaintext passwords are never ingested. Password strength, length, entropy, score, weakness and per-character-class counts are.",
+                    "TimeGenerated is the ingestion time, not the credential observation time, because Azure Monitor rewrites any TimeGenerated older than two days. Observation times are in LastUpdatedTime, FirstSeenTime, LastSeenTime and InfectionTime.",
+                    "Paging, cursor persistence and filter-set migration behave exactly as in the Intel 471 Malware Intelligence playbook version 3.1: the cursor is stored only after a page has been written, an ingestion failure terminates the run instead of silently skipping a page, and the cursor blob records the request filters it was issued for so that changing them triggers a bounded re-ingest rather than a silent gap."
+                ]
+            }
+        ]
     },
     "parameters": {
         "PlaybookName": {
             "defaultValue": "Intel471-ImportCredentialIntelToSentinel",
-            "type": "String"
+            "type": "String",
+            "metadata": {
+                "description": "Name of the logic app to create. Also used as a suffix for the API connection names."
+            }
+        },
+        "StorageAccountName": {
+            "type": "String",
+            "minLength": 3,
+            "metadata": {
+                "description": "Name of the pre-existing Storage Account where the logic app stores the stream cursor."
+            }
+        },
+        "StorageAccountContainerName": {
+            "type": "String",
+            "minLength": 3,
+            "metadata": {
+                "description": "Name of the pre-existing blob container inside the provided Storage Account."
+            }
+        },
+        "KeyVaultName": {
+            "type": "String",
+            "minLength": 3,
+            "metadata": {
+                "description": "Name of the pre-existing Key Vault that already holds the API credentials. The credentials themselves are NOT entered here - store them in the Key Vault before deploying. Expected secret names: VerityUserNameSentinel and VerityAPIKeySentinel."
+            }
+        },
+        "KeyVaultUsernameSecretName": {
+            "defaultValue": "",
+            "type": "String",
+            "metadata": {
+                "description": "Optional - leave empty unless your Key Vault stores the credential under a non-default secret name. This is the NAME of an existing Key Vault secret, not the credential itself: do not paste your Verity Client ID here. Empty means VerityUserNameSentinel."
+            }
+        },
+        "KeyVaultApiKeySecretName": {
+            "defaultValue": "",
+            "type": "String",
+            "metadata": {
+                "description": "Optional - leave empty unless your Key Vault stores the credential under a non-default secret name. This is the NAME of an existing Key Vault secret, not the credential itself: do not paste your Verity Client Secret here. Empty means VerityAPIKeySentinel."
+            }
         },
         "WorkspaceName": {
             "type": "String",
-            "minLength": 1,
+            "minLength": 4,
             "metadata": {
-                "description": "Name of the Log Analytics workspace that will hold the custom table."
+                "description": "Name of the Log Analytics workspace that will hold the Intel471CredentialOccurrences_CL custom table."
             }
         },
         "WorkspaceResourceGroup": {
             "defaultValue": "",
             "type": "String",
             "metadata": {
-                "description": "Resource group of the Log Analytics workspace. Leave empty to use the resource group this template is deployed into."
+                "description": "Resource group of the Log Analytics workspace. Leave empty to use the resource group this template is deployed into. The custom table has to be created in the workspace's own resource group, so this is only needed when the workspace lives elsewhere."
             }
         },
-        "VerityUserName": {
-            "type": "String",
-            "minLength": 1,
+        "TableRetentionInDays": {
+            "defaultValue": -1,
+            "type": "int",
+            "minValue": -1,
+            "maxValue": 730,
             "metadata": {
-                "description": "ITERATION 1 ONLY - Verity API Client ID, sent as the HTTP Basic user name. Moves to Key Vault in a later iteration."
+                "description": "Retention for the custom table in days. Leave -1 to inherit the workspace default. Credential occurrences fan out - one credential seen in three sets produces three rows - so this is the main cost lever."
             }
         },
-        "VerityApiKey": {
-            "type": "SecureString",
-            "minLength": 1,
+        "LookBackDays": {
+            "defaultValue": 0,
+            "type": "int",
+            "minValue": 0,
+            "maxValue": 365,
             "metadata": {
-                "description": "ITERATION 1 ONLY - Verity API Client Secret, sent as the HTTP Basic password. Moves to Key Vault in a later iteration."
+                "description": "How many days of history should be pulled on the first run. Leave 0 to start from the current time. Occurrences are high volume; start small and raise it once you have seen the ingestion rate."
             }
         },
-        "FromTimestamp": {
-            "type": "String",
-            "minLength": 1,
+        "MigrationMarginHours": {
+            "defaultValue": 1,
+            "type": "int",
+            "minValue": 0,
+            "maxValue": 8760,
             "metadata": {
-                "description": "Passed through to the API as the 'from' query parameter, unchanged. UNIX timestamp in MILLISECONDS (13 digits), e.g. 1756684800000."
-            }
-        },
-        "Size": {
-            "defaultValue": "100",
-            "type": "String",
-            "metadata": {
-                "description": "Passed through to the API as the 'size' query parameter, unchanged. Range 1-1000. Keep at or below 100 for the first runs - the whole page is posted in one request and the Logs Ingestion API caps a request at 1 MB."
+                "description": "Safety margin, in hours, applied when the playbook detects that its request filters changed - for example after an upgrade, or after the filters were edited by hand. A stored cursor is only valid for the filter set it was issued against, so it is discarded and the from-date is moved back to this many hours before the discarded cursor's position. The margin is needed because the credential occurrence stream is ordered by last_updated_ts while the from-date filters activity time, so occurrences updated later than they were first observed would otherwise be skipped. Larger values close a bigger publish-lag gap at the cost of re-ingesting more overlapping indicators. Raise it for a single run when a filter change widens what is ingested and you want history for the newly included data."
             }
         }
     },
     "variables": {
+        "AzureBlobConnectionName": "[concat('azureblob-', parameters('PlaybookName'))]",
+        "AzureKeyVaultName": "[parameters('KeyVaultName')]",
+        "AzureKeyVaultConnectionName": "[concat('keyvault-', parameters('PlaybookName'))]",
         "DceName": "dce-intel471-creds",
         "DcrName": "dcr-intel471-creds",
         "TableName": "Intel471CredentialOccurrences_CL",
         "StreamName": "Custom-Intel471CredentialOccurrences_CL",
+        "TableDeploymentName": "Intel471-CredentialOccurrencesTable",
         "WorkspaceRg": "[if(empty(parameters('WorkspaceResourceGroup')), resourceGroup().name, parameters('WorkspaceResourceGroup'))]",
         "WorkspaceResourceId": "[resourceId(variables('WorkspaceRg'), 'Microsoft.OperationalInsights/workspaces', parameters('WorkspaceName'))]"
     },
@@ -68,7 +151,7 @@
         {
             "type": "Microsoft.Resources/deployments",
             "apiVersion": "2021-04-01",
-            "name": "Intel471-CredentialOccurrencesTable",
+            "name": "[variables('TableDeploymentName')]",
             "resourceGroup": "[variables('WorkspaceRg')]",
             "properties": {
                 "mode": "Incremental",
@@ -81,6 +164,9 @@
                     },
                     "tableName": {
                         "value": "[variables('TableName')]"
+                    },
+                    "retentionInDays": {
+                        "value": "[parameters('TableRetentionInDays')]"
                     }
                 },
                 "template": {
@@ -92,6 +178,9 @@
                         },
                         "tableName": {
                             "type": "string"
+                        },
+                        "retentionInDays": {
+                            "type": "int"
                         }
                     },
                     "resources": [
@@ -101,168 +190,209 @@
                             "name": "[concat(parameters('workspaceName'), '/', parameters('tableName'))]",
                             "properties": {
                                 "plan": "Analytics",
+                                "retentionInDays": "[parameters('retentionInDays')]",
                                 "schema": {
                                     "name": "[parameters('tableName')]",
                                     "columns": [
                                         {
                                             "name": "TimeGenerated",
-                                            "type": "datetime"
+                                            "type": "datetime",
+                                            "description": "Time this playbook ingested the row - NOT when the credential was seen. Use LastUpdatedTime for that."
                                         },
                                         {
                                             "name": "OccurrenceId",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Unique credential occurrence identifier."
                                         },
                                         {
                                             "name": "LastUpdatedTime",
-                                            "type": "datetime"
+                                            "type": "datetime",
+                                            "description": "Occurrence last modification date. The field the stream is ordered and cursored by."
                                         },
                                         {
                                             "name": "FirstSeenTime",
-                                            "type": "datetime"
+                                            "type": "datetime",
+                                            "description": "Start of the credential activity range."
                                         },
                                         {
                                             "name": "LastSeenTime",
-                                            "type": "datetime"
+                                            "type": "datetime",
+                                            "description": "End of the credential activity range."
                                         },
                                         {
                                             "name": "CredentialId",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Unique credential identifier. Multiple occurrences share one credential."
                                         },
                                         {
                                             "name": "CredentialLogin",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Login of the credential, usually an email address."
                                         },
                                         {
                                             "name": "AccountName",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Derived: CredentialLogin before the @, for Sentinel Account entity mapping."
                                         },
                                         {
                                             "name": "AccountUPNSuffix",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Derived: CredentialLogin after the @. Empty when the login is not an email."
                                         },
                                         {
                                             "name": "CredentialDomain",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Domain of the credential login."
                                         },
                                         {
                                             "name": "DetectionDomain",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Monitored domain that caused this credential to be detected."
                                         },
                                         {
                                             "name": "Affiliations",
-                                            "type": "dynamic"
+                                            "type": "dynamic",
+                                            "description": "Array of my_employees, vip_emails, my_customers, third_parties."
                                         },
                                         {
                                             "name": "PasswordId",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Opaque password identifier. Equal ids mean equal passwords - useful for finding shared passwords."
                                         },
                                         {
                                             "name": "PasswordStrength",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "excellent, strong, medium, weak, poor or not_provided."
                                         },
                                         {
                                             "name": "PasswordLength",
-                                            "type": "int"
+                                            "type": "int",
+                                            "description": "Number of characters in the password."
                                         },
                                         {
                                             "name": "PasswordEntropy",
-                                            "type": "real"
+                                            "type": "real",
+                                            "description": "Password entropy."
                                         },
                                         {
                                             "name": "PasswordScore",
-                                            "type": "real"
+                                            "type": "real",
+                                            "description": "Password score, 0 to 1."
                                         },
                                         {
                                             "name": "PasswordWeakness",
-                                            "type": "real"
+                                            "type": "real",
+                                            "description": "Password weakness."
                                         },
                                         {
                                             "name": "PasswordComplexity",
-                                            "type": "dynamic"
+                                            "type": "dynamic",
+                                            "description": "Full complexity object: per-character-class counts plus length, score, weakness, entropy."
                                         },
                                         {
                                             "name": "AccessedDomain",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Domain the victim was logging in to when the credential was captured."
                                         },
                                         {
                                             "name": "AccessedUrl",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "URL the victim was logging in to."
                                         },
                                         {
                                             "name": "CredentialSetId",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Identifier of the credential set this sighting came from."
                                         },
                                         {
                                             "name": "CredentialSetName",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Name of the credential set."
                                         },
                                         {
                                             "name": "CredentialType",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Type of the credential set, e.g. infostealer."
                                         },
                                         {
                                             "name": "FilePath",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Path of the file within the credential set that held this occurrence."
                                         },
                                         {
                                             "name": "SoftwareName",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Application the credential was stolen from, e.g. Chrome (Profile 1)."
                                         },
                                         {
                                             "name": "MalwareFamily",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Information stealer family, e.g. Redline, Lumma, VIDAR."
                                         },
                                         {
                                             "name": "InfectionTime",
-                                            "type": "datetime"
+                                            "type": "datetime",
+                                            "description": "When the host was infected."
                                         },
                                         {
                                             "name": "MachineId",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Identifier of the infected machine."
                                         },
                                         {
                                             "name": "PcName",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Host name of the infected machine."
                                         },
                                         {
                                             "name": "ComputerUsername",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Local user account on the infected machine."
                                         },
                                         {
                                             "name": "SourceIP",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "IP address of the infected machine."
                                         },
                                         {
                                             "name": "ISP",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Internet service provider of the infected machine."
                                         },
                                         {
                                             "name": "OperatingSystem",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Operating system of the infected machine."
                                         },
                                         {
                                             "name": "AntivirusSoftware",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Antivirus reported on the infected machine."
                                         },
                                         {
                                             "name": "MalwareInstallPath",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Installation path of the stealer."
                                         },
                                         {
                                             "name": "ScreenshotPath",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Path of the screenshot captured by the stealer."
                                         },
                                         {
                                             "name": "StealerVersion",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Version of the stealer."
                                         },
                                         {
                                             "name": "Girs",
-                                            "type": "dynamic"
+                                            "type": "dynamic",
+                                            "description": "General Intelligence Requirements as an array of {path, name}. Do NOT filter with 'has' - see the README."
                                         },
                                         {
                                             "name": "SourceSystem",
-                                            "type": "string"
+                                            "type": "string",
+                                            "description": "Provenance literal."
                                         }
                                     ]
                                 }
@@ -290,7 +420,7 @@
             "location": "[resourceGroup().location]",
             "dependsOn": [
                 "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))]",
-                "[resourceId('Microsoft.Resources/deployments', 'Intel471-CredentialOccurrencesTable')]"
+                "[resourceId('Microsoft.Resources/deployments', variables('TableDeploymentName'))]"
             ],
             "properties": {
                 "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))]",
@@ -483,6 +613,42 @@
             }
         },
         {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('AzureBlobConnectionName')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('AzureBlobConnectionName')]",
+                "customParameterValues": {},
+                "parameterValueSet": {
+                    "name": "managedIdentityAuth",
+                    "values": {}
+                },
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureblob')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('AzureKeyVaultConnectionName')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('AzureKeyVaultConnectionName')]",
+                "customParameterValues": {},
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/keyvault')]"
+                },
+                "parameterValueType": "Alternative",
+                "alternativeParameterValues": {
+                    "vaultName": "[variables('AzureKeyVaultName')]"
+                }
+            }
+        },
+        {
             "type": "Microsoft.Logic/workflows",
             "apiVersion": "2017-07-01",
             "name": "[parameters('PlaybookName')]",
@@ -491,12 +657,14 @@
                 "type": "SystemAssigned"
             },
             "dependsOn": [
+                "[resourceId('Microsoft.Web/connections', variables('AzureBlobConnectionName'))]",
+                "[resourceId('Microsoft.Web/connections', variables('AzureKeyVaultConnectionName'))]",
                 "[resourceId('Microsoft.Insights/dataCollectionRules', variables('DcrName'))]"
             ],
             "tags": {
                 "LogicAppsCategory": "security",
                 "hidden-SentinelTemplateName": "Intel471-ImportCredentialIntelToSentinel",
-                "hidden-SentinelTemplateVersion": "0.1"
+                "hidden-SentinelTemplateVersion": "1.0"
             },
             "properties": {
                 "state": "Enabled",
@@ -504,25 +672,61 @@
                     "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
                     "contentVersion": "1.0.0.0",
                     "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "StorageAccountName": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "StorageAccountContainerName": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "BlobNameCursor": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "BlobNameFromDate": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
                         "ApiURI": {
                             "defaultValue": "",
                             "type": "String"
                         },
-                        "VerityUserName": {
+                        "UsernameSecretName": {
                             "defaultValue": "",
                             "type": "String"
                         },
-                        "VerityApiKey": {
-                            "defaultValue": "",
-                            "type": "SecureString"
-                        },
-                        "FromTimestamp": {
+                        "ApiKeySecretName": {
                             "defaultValue": "",
                             "type": "String"
                         },
-                        "Size": {
+                        "RequestParamFrom": {
                             "defaultValue": "",
                             "type": "String"
+                        },
+                        "RequestParamSize": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "ResponseFieldCursor": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "FilterSetMigration": {
+                            "defaultValue": "enabled",
+                            "type": "String"
+                        },
+                        "LookBackDays": {
+                            "defaultValue": 0,
+                            "type": "int"
+                        },
+                        "MigrationMarginHours": {
+                            "defaultValue": 0,
+                            "type": "int"
                         },
                         "DataCollectionEndpoint": {
                             "defaultValue": "",
@@ -538,202 +742,884 @@
                         }
                     },
                     "triggers": {
-                        "manual": {
-                            "type": "Request",
-                            "kind": "Http",
-                            "inputs": {
-                                "schema": {}
-                            }
+                        "Recurrence": {
+                            "recurrence": {
+                                "frequency": "Hour",
+                                "interval": 1
+                            },
+                            "runtimeConfiguration": {
+                                "concurrency": {
+                                    "runs": 1
+                                }
+                            },
+                            "type": "Recurrence"
                         }
                     },
                     "actions": {
-                        "CallVerity": {
-                            "type": "Http",
-                            "runAfter": {},
+                        "GetUsername": {
+                            "type": "ApiConnection",
                             "inputs": {
-                                "method": "GET",
-                                "uri": "@parameters('ApiURI')",
-                                "headers": {
-                                    "User-Agent": "Intel471-SentinelCredentialIntelligence/0.1"
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['keyvault']['connectionId']"
+                                    }
                                 },
-                                "queries": {
-                                    "from": "@parameters('FromTimestamp')",
-                                    "size": "@parameters('Size')"
-                                },
-                                "authentication": {
-                                    "type": "Basic",
-                                    "username": "@parameters('VerityUserName')",
-                                    "password": "@parameters('VerityApiKey')"
-                                }
-                            }
+                                "method": "get",
+                                "path": "/secrets/@{encodeURIComponent(parameters('UsernameSecretName'))}/value"
+                            },
+                            "runAfter": {}
                         },
-                        "Parse_JSON": {
-                            "type": "ParseJson",
+                        "GetApiKey": {
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['keyvault']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "/secrets/@{encodeURIComponent(parameters('ApiKeySecretName'))}/value"
+                            },
                             "runAfter": {
-                                "CallVerity": [
+                                "GetUsername": [
                                     "Succeeded"
                                 ]
-                            },
+                            }
+                        },
+                        "InitVariables": {
+                            "type": "InitializeVariable",
                             "inputs": {
-                                "content": "@body('CallVerity')",
-                                "schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "count": {
-                                            "type": "integer"
-                                        },
-                                        "cursor_next": {
-                                            "type": "string"
-                                        },
-                                        "credential_occurrences": {
-                                            "type": "array",
-                                            "items": {
-                                                "type": "object"
-                                            }
+                                "variables": [
+                                    {
+                                        "name": "hasResults",
+                                        "type": "boolean",
+                                        "value": true
+                                    },
+                                    {
+                                        "name": "cursor",
+                                        "type": "string",
+                                        "value": "null"
+                                    },
+                                    {
+                                        "name": "cursorRaw",
+                                        "type": "string",
+                                        "value": "null"
+                                    },
+                                    {
+                                        "name": "fromDate",
+                                        "type": "integer"
+                                    },
+                                    {
+                                        "name": "resetAnchorMs",
+                                        "type": "integer"
+                                    },
+                                    {
+                                        "name": "uploadError",
+                                        "type": "string",
+                                        "value": "none"
+                                    },
+                                    {
+                                        "name": "payload",
+                                        "type": "object",
+                                        "value": {
+                                            "@{parameters('RequestParamSize')}": 100
                                         }
                                     }
-                                }
-                            }
-                        },
-                        "MapOccurrences": {
-                            "type": "Select",
-                            "runAfter": {
-                                "Parse_JSON": [
-                                    "Succeeded"
                                 ]
                             },
+                            "runAfter": {
+                                "GetApiKey": [
+                                    "Succeeded"
+                                ]
+                            }
+                        },
+                        "ComputeFilterSetMarker": {
+                            "type": "Compose",
+                            "inputs": "@string(variables('payload'))",
+                            "runAfter": {
+                                "InitVariables": [
+                                    "Succeeded"
+                                ]
+                            }
+                        },
+                        "GetCursorFromBlob": {
+                            "type": "ApiConnection",
                             "inputs": {
-                                "from": "@coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]'))",
-                                "select": {
-                                    "TimeGenerated": "@utcNow()",
-                                    "OccurrenceId": "@item()?['id']",
-                                    "LastUpdatedTime": "@item()?['last_updated_ts']",
-                                    "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
-                                    "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
-                                    "CredentialId": "@item()?['data']?['credential']?['id']",
-                                    "CredentialLogin": "@item()?['data']?['credential']?['credential_login']",
-                                    "AccountName": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential']?['credential_login'], ''))",
-                                    "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')), '')",
-                                    "CredentialDomain": "@item()?['data']?['credential']?['credential_domain']",
-                                    "DetectionDomain": "@item()?['data']?['credential']?['detection_domain']",
-                                    "Affiliations": "@item()?['data']?['credential']?['affiliations']",
-                                    "PasswordId": "@item()?['data']?['credential']?['password']?['id']",
-                                    "PasswordStrength": "@item()?['data']?['credential']?['password']?['strength']",
-                                    "PasswordLength": "@item()?['data']?['credential']?['password']?['complexity']?['length']",
-                                    "PasswordEntropy": "@item()?['data']?['credential']?['password']?['complexity']?['entropy']",
-                                    "PasswordScore": "@item()?['data']?['credential']?['password']?['complexity']?['score']",
-                                    "PasswordWeakness": "@item()?['data']?['credential']?['password']?['complexity']?['weakness']",
-                                    "PasswordComplexity": "@item()?['data']?['credential']?['password']?['complexity']",
-                                    "AccessedDomain": "@item()?['data']?['accessed_domain']",
-                                    "AccessedUrl": "@item()?['data']?['accessed_url']",
-                                    "CredentialSetId": "@item()?['data']?['credential_set']?['id']",
-                                    "CredentialSetName": "@item()?['data']?['credential_set']?['name']",
-                                    "CredentialType": "@item()?['data']?['credential_type']",
-                                    "FilePath": "@item()?['data']?['file_path']",
-                                    "SoftwareName": "@item()?['data']?['software_name']",
-                                    "MalwareFamily": "@item()?['data']?['info_stealer']?['malware_family']",
-                                    "InfectionTime": "@item()?['data']?['info_stealer']?['infection_ts']",
-                                    "MachineId": "@item()?['data']?['info_stealer']?['machine_id']",
-                                    "PcName": "@item()?['data']?['info_stealer']?['pc_name']",
-                                    "ComputerUsername": "@item()?['data']?['info_stealer']?['computer_username']",
-                                    "SourceIP": "@item()?['data']?['info_stealer']?['ip']",
-                                    "ISP": "@item()?['data']?['info_stealer']?['isp']",
-                                    "OperatingSystem": "@item()?['data']?['info_stealer']?['os']",
-                                    "AntivirusSoftware": "@item()?['data']?['info_stealer']?['antivirus_software']",
-                                    "MalwareInstallPath": "@item()?['data']?['info_stealer']?['malware_install_path']",
-                                    "ScreenshotPath": "@item()?['data']?['info_stealer']?['screenshot_path']",
-                                    "StealerVersion": "@item()?['data']?['info_stealer']?['version']",
-                                    "Girs": "@item()?['classification']?['girs']",
-                                    "SourceSystem": "Intel 471 Verity"
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files/@{uriComponent(uriComponent(parameters('StorageAccountContainerName'),'/',parameters('BlobNameCursor')))}/content",
+                                "queries": {
+                                    "inferContentType": true
                                 }
-                            }
-                        },
-                        "HasOccurrences": {
-                            "type": "If",
+                            },
                             "runAfter": {
-                                "MapOccurrences": [
+                                "ComputeFilterSetMarker": [
                                     "Succeeded"
                                 ]
-                            },
+                            }
+                        },
+                        "IfCursorBlobExists": {
+                            "type": "If",
                             "expression": {
                                 "and": [
                                     {
                                         "equals": [
-                                            "@empty(body('MapOccurrences'))",
+                                            "@actions('GetCursorFromBlob').status",
+                                            "Succeeded"
+                                        ]
+                                    }
+                                ]
+                            },
+                            "actions": {
+                                "SetCursorRaw": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "cursorRaw",
+                                        "value": "@trim(string(coalesce(body('GetCursorFromBlob'), 'null')))"
+                                    }
+                                },
+                                "SetCursor": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "cursor",
+                                        "value": "@if(empty(last(split(variables('cursorRaw'), '|'))), 'null', last(split(variables('cursorRaw'), '|')))"
+                                    },
+                                    "runAfter": {
+                                        "SetCursorRaw": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                }
+                            },
+                            "else": {
+                                "actions": {
+                                    "IfCursorBlobMissing": {
+                                        "type": "If",
+                                        "expression": {
+                                            "and": [
+                                                {
+                                                    "equals": [
+                                                        "@actions('GetCursorFromBlob').outputs.statusCode",
+                                                        404
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "actions": {
+                                            "CreateBlobForCursor": {
+                                                "type": "ApiConnection",
+                                                "inputs": {
+                                                    "host": {
+                                                        "connection": {
+                                                            "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                                        }
+                                                    },
+                                                    "method": "post",
+                                                    "body": "@{outputs('ComputeFilterSetMarker')}|null",
+                                                    "headers": {
+                                                        "ReadFileMetadataFromServer": true
+                                                    },
+                                                    "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files",
+                                                    "queries": {
+                                                        "folderPath": "@parameters('StorageAccountContainerName')",
+                                                        "name": "@parameters('BlobNameCursor')",
+                                                        "queryParametersSingleEncoded": true
+                                                    }
+                                                },
+                                                "runtimeConfiguration": {
+                                                    "contentTransfer": {
+                                                        "transferMode": "Chunked"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "else": {
+                                            "actions": {
+                                                "TerminateOnCursorBlobFailure": {
+                                                    "type": "Terminate",
+                                                    "inputs": {
+                                                        "runStatus": "Failed",
+                                                        "runError": {
+                                                            "code": "CursorBlobUnreadable",
+                                                            "message": "Could not read the blob '@{parameters('BlobNameCursor')}' from container '@{parameters('StorageAccountContainerName')}' in storage account '@{parameters('StorageAccountName')}'. HTTP status: @{actions('GetCursorFromBlob').outputs.statusCode}. A 403 usually means the storage account firewall is blocking the Azure Blob Storage connector, or that shared key access is disabled on the storage account. See the 'Storage account requirements' section of the playbook README."
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "GetCursorFromBlob": [
+                                    "Succeeded",
+                                    "Failed"
+                                ]
+                            }
+                        },
+                        "GetFromDateFromBlob": {
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files/@{uriComponent(uriComponent(parameters('StorageAccountContainerName'),'/',parameters('BlobNameFromDate')))}/content",
+                                "queries": {
+                                    "inferContentType": true
+                                }
+                            },
+                            "runAfter": {
+                                "IfCursorBlobExists": [
+                                    "Succeeded"
+                                ]
+                            }
+                        },
+                        "IfFromDateBlobExists": {
+                            "type": "If",
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@actions('GetFromDateFromBlob').status",
+                                            "Succeeded"
+                                        ]
+                                    }
+                                ]
+                            },
+                            "actions": {
+                                "SetFromDateFromBlob": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "fromDate",
+                                        "value": "@int(trim(string(body('GetFromDateFromBlob'))))"
+                                    }
+                                }
+                            },
+                            "else": {
+                                "actions": {
+                                    "IfFromDateBlobMissing": {
+                                        "type": "If",
+                                        "expression": {
+                                            "and": [
+                                                {
+                                                    "equals": [
+                                                        "@actions('GetFromDateFromBlob').outputs.statusCode",
+                                                        404
+                                                    ]
+                                                }
+                                            ]
+                                        },
+                                        "actions": {
+                                            "CreateBlobForFromDate": {
+                                                "type": "ApiConnection",
+                                                "inputs": {
+                                                    "host": {
+                                                        "connection": {
+                                                            "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                                        }
+                                                    },
+                                                    "method": "post",
+                                                    "body": "@variables('fromDate')",
+                                                    "headers": {
+                                                        "ReadFileMetadataFromServer": true
+                                                    },
+                                                    "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files",
+                                                    "queries": {
+                                                        "folderPath": "@parameters('StorageAccountContainerName')",
+                                                        "name": "@parameters('BlobNameFromDate')",
+                                                        "queryParametersSingleEncoded": true
+                                                    }
+                                                },
+                                                "runAfter": {
+                                                    "SetFromDate": [
+                                                        "Succeeded"
+                                                    ]
+                                                },
+                                                "runtimeConfiguration": {
+                                                    "contentTransfer": {
+                                                        "transferMode": "Chunked"
+                                                    }
+                                                }
+                                            },
+                                            "SetFromDate": {
+                                                "type": "SetVariable",
+                                                "inputs": {
+                                                    "name": "fromDate",
+                                                    "value": "@div(if(equals(parameters('LookBackDays'), 0), sub(ticks(utcNow()),ticks('1970-01-01')), sub(sub(ticks(utcNow()), mul(864000000000, parameters('LookBackDays'))), ticks('1970-01-01'))), 10000)"
+                                                }
+                                            }
+                                        },
+                                        "else": {
+                                            "actions": {
+                                                "TerminateOnFromDateBlobFailure": {
+                                                    "type": "Terminate",
+                                                    "inputs": {
+                                                        "runStatus": "Failed",
+                                                        "runError": {
+                                                            "code": "FromDateBlobUnreadable",
+                                                            "message": "Could not read the blob '@{parameters('BlobNameFromDate')}' from container '@{parameters('StorageAccountContainerName')}' in storage account '@{parameters('StorageAccountName')}'. HTTP status: @{actions('GetFromDateFromBlob').outputs.statusCode}. A 403 usually means the storage account firewall is blocking the Azure Blob Storage connector, or that shared key access is disabled on the storage account. See the 'Storage account requirements' section of the playbook README."
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "GetFromDateFromBlob": [
+                                    "Succeeded",
+                                    "Failed"
+                                ]
+                            }
+                        },
+                        "IfFilterSetChanged": {
+                            "type": "If",
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@startsWith(variables('cursorRaw'), concat(outputs('ComputeFilterSetMarker'), '|'))",
+                                            false
+                                        ]
+                                    },
+                                    {
+                                        "equals": [
+                                            "@equals(variables('cursor'), 'null')",
+                                            false
+                                        ]
+                                    },
+                                    {
+                                        "equals": [
+                                            "@parameters('FilterSetMigration')",
+                                            "enabled"
+                                        ]
+                                    }
+                                ]
+                            },
+                            "actions": {
+                                "TryDecodeCursorEpochMs": {
+                                    "type": "Scope",
+                                    "actions": {
+                                        "DecodeCursor": {
+                                            "type": "Compose",
+                                            "inputs": "@base64ToString(variables('cursor'))"
+                                        },
+                                        "SetResetAnchorFromCursor": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "resetAnchorMs",
+                                                "value": "@int(split(outputs('DecodeCursor'), ':')[1])"
+                                            },
+                                            "runAfter": {
+                                                "DecodeCursor": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        }
+                                    }
+                                },
+                                "SetResetAnchorFromNow": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "resetAnchorMs",
+                                        "value": "@div(sub(ticks(utcNow()), ticks('1970-01-01')), 10000)"
+                                    },
+                                    "runAfter": {
+                                        "TryDecodeCursorEpochMs": [
+                                            "Failed",
+                                            "TimedOut",
+                                            "Skipped"
+                                        ]
+                                    }
+                                },
+                                "ComputeMigratedFromDate": {
+                                    "type": "Compose",
+                                    "inputs": "@int(max(variables('fromDate'), sub(variables('resetAnchorMs'), mul(3600000, parameters('MigrationMarginHours')))))",
+                                    "runAfter": {
+                                        "SetResetAnchorFromNow": [
+                                            "Succeeded",
+                                            "Skipped"
+                                        ]
+                                    }
+                                },
+                                "LogFilterSetMigration": {
+                                    "type": "Compose",
+                                    "inputs": {
+                                        "event": "Intel471FilterSetChanged",
+                                        "action": "The stored cursor was issued for a different filter set, so it has been discarded and the from-date moved forward. A one-off overlapping re-ingest is expected.",
+                                        "storedCursorBlob": "@{variables('cursorRaw')}",
+                                        "currentFilterSet": "@{outputs('ComputeFilterSetMarker')}",
+                                        "resetAnchorSource": "@{if(equals(actions('TryDecodeCursorEpochMs').status, 'Succeeded'), 'cursor', 'utcNow')}",
+                                        "resetAnchorEpochMs": "@{variables('resetAnchorMs')}",
+                                        "marginHours": "@{parameters('MigrationMarginHours')}",
+                                        "oldFromDateEpochMs": "@{variables('fromDate')}",
+                                        "oldFromDateUtc": "@{addToTime('1970-01-01T00:00:00Z', div(variables('fromDate'), 1000), 'second')}",
+                                        "newFromDateEpochMs": "@{outputs('ComputeMigratedFromDate')}",
+                                        "newFromDateUtc": "@{addToTime('1970-01-01T00:00:00Z', div(outputs('ComputeMigratedFromDate'), 1000), 'second')}"
+                                    },
+                                    "runAfter": {
+                                        "ComputeMigratedFromDate": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "StoreMigratedFromDate": {
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                            }
+                                        },
+                                        "method": "put",
+                                        "body": "@outputs('ComputeMigratedFromDate')",
+                                        "headers": {
+                                            "ReadFileMetadataFromServer": true
+                                        },
+                                        "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files/@{uriComponent(uriComponent(parameters('StorageAccountContainerName'),'/',parameters('BlobNameFromDate')))}"
+                                    },
+                                    "runAfter": {
+                                        "LogFilterSetMigration": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "ResetCursorBlobForNewFilterSet": {
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                            }
+                                        },
+                                        "method": "put",
+                                        "body": "@{outputs('ComputeFilterSetMarker')}|null",
+                                        "headers": {
+                                            "ReadFileMetadataFromServer": true
+                                        },
+                                        "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files/@{uriComponent(uriComponent(parameters('StorageAccountContainerName'),'/',parameters('BlobNameCursor')))}"
+                                    },
+                                    "runAfter": {
+                                        "StoreMigratedFromDate": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "ApplyMigratedFromDate": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "fromDate",
+                                        "value": "@outputs('ComputeMigratedFromDate')"
+                                    },
+                                    "runAfter": {
+                                        "ResetCursorBlobForNewFilterSet": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "ApplyResetCursor": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "cursor",
+                                        "value": "null"
+                                    },
+                                    "runAfter": {
+                                        "ApplyMigratedFromDate": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                }
+                            },
+                            "else": {
+                                "actions": {
+                                    "LogFilterSetUnchanged": {
+                                        "type": "Compose",
+                                        "inputs": {
+                                            "event": "Intel471FilterSetUnchanged",
+                                            "storedCursorBlob": "@{variables('cursorRaw')}",
+                                            "currentFilterSet": "@{outputs('ComputeFilterSetMarker')}",
+                                            "cursorPresent": "@{not(equals(variables('cursor'), 'null'))}",
+                                            "migration": "@{parameters('FilterSetMigration')}",
+                                            "fromDateEpochMs": "@{variables('fromDate')}"
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "IfFromDateBlobExists": [
+                                    "Succeeded"
+                                ]
+                            }
+                        },
+                        "IfUploadFailed": {
+                            "type": "If",
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@equals(variables('uploadError'), 'none')",
                                             false
                                         ]
                                     }
                                 ]
                             },
                             "actions": {
-                                "PostToDcr": {
-                                    "type": "Http",
-                                    "runAfter": {},
+                                "TerminateOnUploadFailure": {
+                                    "type": "Terminate",
                                     "inputs": {
-                                        "method": "POST",
-                                        "uri": "@{concat(parameters('DataCollectionEndpoint'), '/dataCollectionRules/', parameters('DcrImmutableId'), '/streams/', parameters('StreamName'), '?api-version=2023-01-01')}",
-                                        "headers": {
-                                            "Content-Type": "application/json"
-                                        },
-                                        "body": "@body('MapOccurrences')",
-                                        "authentication": {
-                                            "type": "ManagedServiceIdentity",
-                                            "audience": "https://monitor.azure.com"
+                                        "runStatus": "Failed",
+                                        "runError": {
+                                            "code": "CredentialUploadFailed",
+                                            "message": "Posting credential occurrences to the Logs Ingestion API failed with @{variables('uploadError')}. The cursor was not advanced, so the next run retries the same page. HTTP 403 almost always means the logic app's managed identity is missing the 'Monitoring Metrics Publisher' role on the data collection rule - note that Azure documents up to 30 minutes for that assignment to take effect, and that recreating either the logic app or the DCR invalidates it. HTTP 413 means the page is too large for a single request - lower the size value in the payload variable of InitVariables. See the Troubleshooting section of the playbook README."
                                         }
-                                    }
-                                },
-                                "ReportIngested": {
-                                    "type": "Compose",
-                                    "runAfter": {
-                                        "PostToDcr": [
-                                            "Succeeded"
-                                        ]
-                                    },
-                                    "inputs": {
-                                        "event": "Intel471CredentialsIngested",
-                                        "requestedSize": "@{parameters('Size')}",
-                                        "requestedFrom": "@{parameters('FromTimestamp')}",
-                                        "totalMatchingCount": "@{body('Parse_JSON')?['count']}",
-                                        "returnedOnThisPage": "@{length(coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]')))}",
-                                        "rowsPosted": "@{length(body('MapOccurrences'))}",
-                                        "cursorNextIgnored": "@{body('Parse_JSON')?['cursor_next']}",
-                                        "table": "@{parameters('StreamName')}"
                                     }
                                 }
                             },
                             "else": {
                                 "actions": {
-                                    "ReportNothingReturned": {
+                                    "LogPagingCompleted": {
                                         "type": "Compose",
                                         "inputs": {
-                                            "event": "Intel471NoCredentialsReturned",
-                                            "requestedFrom": "@{parameters('FromTimestamp')}",
-                                            "requestedSize": "@{parameters('Size')}",
-                                            "totalMatchingCount": "@{body('Parse_JSON')?['count']}",
-                                            "hint": "A count of 0 usually means the from timestamp is in the future, or is in seconds rather than milliseconds, or the account has no credential data in that window."
+                                            "event": "Intel471PagingCompleted",
+                                            "fromDateEpochMs": "@{variables('fromDate')}",
+                                            "cursorStored": "@{variables('cursor')}"
                                         }
                                     }
                                 }
+                            },
+                            "runAfter": {
+                                "CollectAndSubmitOccurrences": [
+                                    "Succeeded"
+                                ]
+                            }
+                        },
+                        "CollectAndSubmitOccurrences": {
+                            "type": "Until",
+                            "expression": "@equals(variables('hasResults'), false)",
+                            "limit": {
+                                "count": 60,
+                                "timeout": "PT1H"
+                            },
+                            "actions": {
+                                "HTTP": {
+                                    "type": "Http",
+                                    "inputs": {
+                                        "uri": "@parameters('ApiURI')",
+                                        "method": "GET",
+                                        "headers": {
+                                            "User-Agent": "Intel471-SentinelCredentialIntelligence/3.1.0"
+                                        },
+                                        "queries": "@if(equals(variables('cursor'), 'null'), setProperty(variables('payload'), parameters('RequestParamFrom'), string(variables('fromDate'))), setProperty(setProperty(variables('payload'), parameters('RequestParamFrom'), string(variables('fromDate'))), 'cursor', variables('cursor')))",
+                                        "authentication": {
+                                            "password": "@body('GetApiKey')?['value']",
+                                            "type": "Basic",
+                                            "username": "@body('GetUsername')?['value']"
+                                        }
+                                    }
+                                },
+                                "Parse_JSON": {
+                                    "type": "ParseJson",
+                                    "inputs": {
+                                        "content": "@body('HTTP')",
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "count": {
+                                                    "type": "integer"
+                                                },
+                                                "cursor_next": {
+                                                    "type": "string"
+                                                },
+                                                "credential_occurrences": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "HTTP": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "SetHasResults": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "hasResults",
+                                        "value": "@not(empty(body('Parse_JSON')?['credential_occurrences']))"
+                                    },
+                                    "runAfter": {
+                                        "Parse_JSON": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "MapOccurrences": {
+                                    "type": "Select",
+                                    "inputs": {
+                                        "from": "@coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]'))",
+                                        "select": {
+                                            "TimeGenerated": "@utcNow()",
+                                            "OccurrenceId": "@item()?['id']",
+                                            "LastUpdatedTime": "@item()?['last_updated_ts']",
+                                            "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
+                                            "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
+                                            "CredentialId": "@item()?['data']?['credential']?['id']",
+                                            "CredentialLogin": "@item()?['data']?['credential']?['credential_login']",
+                                            "AccountName": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential']?['credential_login'], ''))",
+                                            "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')), '')",
+                                            "CredentialDomain": "@item()?['data']?['credential']?['credential_domain']",
+                                            "DetectionDomain": "@item()?['data']?['credential']?['detection_domain']",
+                                            "Affiliations": "@item()?['data']?['credential']?['affiliations']",
+                                            "PasswordId": "@item()?['data']?['credential']?['password']?['id']",
+                                            "PasswordStrength": "@item()?['data']?['credential']?['password']?['strength']",
+                                            "PasswordLength": "@item()?['data']?['credential']?['password']?['complexity']?['length']",
+                                            "PasswordEntropy": "@item()?['data']?['credential']?['password']?['complexity']?['entropy']",
+                                            "PasswordScore": "@item()?['data']?['credential']?['password']?['complexity']?['score']",
+                                            "PasswordWeakness": "@item()?['data']?['credential']?['password']?['complexity']?['weakness']",
+                                            "PasswordComplexity": "@item()?['data']?['credential']?['password']?['complexity']",
+                                            "AccessedDomain": "@item()?['data']?['accessed_domain']",
+                                            "AccessedUrl": "@item()?['data']?['accessed_url']",
+                                            "CredentialSetId": "@item()?['data']?['credential_set']?['id']",
+                                            "CredentialSetName": "@item()?['data']?['credential_set']?['name']",
+                                            "CredentialType": "@item()?['data']?['credential_type']",
+                                            "FilePath": "@item()?['data']?['file_path']",
+                                            "SoftwareName": "@item()?['data']?['software_name']",
+                                            "MalwareFamily": "@item()?['data']?['info_stealer']?['malware_family']",
+                                            "InfectionTime": "@item()?['data']?['info_stealer']?['infection_ts']",
+                                            "MachineId": "@item()?['data']?['info_stealer']?['machine_id']",
+                                            "PcName": "@item()?['data']?['info_stealer']?['pc_name']",
+                                            "ComputerUsername": "@item()?['data']?['info_stealer']?['computer_username']",
+                                            "SourceIP": "@item()?['data']?['info_stealer']?['ip']",
+                                            "ISP": "@item()?['data']?['info_stealer']?['isp']",
+                                            "OperatingSystem": "@item()?['data']?['info_stealer']?['os']",
+                                            "AntivirusSoftware": "@item()?['data']?['info_stealer']?['antivirus_software']",
+                                            "MalwareInstallPath": "@item()?['data']?['info_stealer']?['malware_install_path']",
+                                            "ScreenshotPath": "@item()?['data']?['info_stealer']?['screenshot_path']",
+                                            "StealerVersion": "@item()?['data']?['info_stealer']?['version']",
+                                            "Girs": "@item()?['classification']?['girs']",
+                                            "SourceSystem": "Intel 471 Verity"
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "SetHasResults": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "HasFilteredResults": {
+                                    "type": "If",
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "equals": [
+                                                    "@not(empty(body('MapOccurrences')))",
+                                                    true
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "actions": {
+                                        "PostToDcr": {
+                                            "type": "Http",
+                                            "inputs": {
+                                                "method": "POST",
+                                                "uri": "@{concat(parameters('DataCollectionEndpoint'), '/dataCollectionRules/', parameters('DcrImmutableId'), '/streams/', parameters('StreamName'), '?api-version=2023-01-01')}",
+                                                "headers": {
+                                                    "Content-Type": "application/json"
+                                                },
+                                                "body": "@body('MapOccurrences')",
+                                                "authentication": {
+                                                    "type": "ManagedServiceIdentity",
+                                                    "audience": "https://monitor.azure.com"
+                                                },
+                                                "retryPolicy": {
+                                                    "type": "exponential",
+                                                    "count": 4,
+                                                    "interval": "PT10S",
+                                                    "minimumInterval": "PT5S",
+                                                    "maximumInterval": "PT1M"
+                                                }
+                                            }
+                                        },
+                                        "SetUploadError": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "uploadError",
+                                                "value": "@concat('HTTP ', string(coalesce(actions('PostToDcr')?['outputs']?['statusCode'], 'unknown')), ': ', string(coalesce(actions('PostToDcr')?['outputs']?['body'], 'no response body')))"
+                                            },
+                                            "runAfter": {
+                                                "PostToDcr": [
+                                                    "Failed",
+                                                    "TimedOut"
+                                                ]
+                                            }
+                                        },
+                                        "StopPagingAfterUploadFailure": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "hasResults",
+                                                "value": false
+                                            },
+                                            "runAfter": {
+                                                "SetUploadError": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        }
+                                    },
+                                    "else": {
+                                        "actions": {}
+                                    },
+                                    "runAfter": {
+                                        "MapOccurrences": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                },
+                                "CursorNotNull": {
+                                    "type": "If",
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "not": {
+                                                    "equals": [
+                                                        "@body('Parse_JSON')?[parameters('ResponseFieldCursor')]",
+                                                        "@null"
+                                                    ]
+                                                }
+                                            },
+                                            {
+                                                "equals": [
+                                                    "@variables('uploadError')",
+                                                    "none"
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "actions": {
+                                        "StoreCursor": {
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "put",
+                                                "body": "@{outputs('ComputeFilterSetMarker')}|@{variables('cursor')}",
+                                                "headers": {
+                                                    "ReadFileMetadataFromServer": true
+                                                },
+                                                "path": "/v2/datasets/@{uriComponent(uriComponent(parameters('StorageAccountName')))}/files/@{uriComponent(uriComponent(parameters('StorageAccountContainerName'),'/',parameters('BlobNameCursor')))}"
+                                            },
+                                            "runAfter": {
+                                                "UpdateCursor": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        },
+                                        "UpdateCursor": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "cursor",
+                                                "value": "@body('Parse_JSON')?[parameters('ResponseFieldCursor')]"
+                                            }
+                                        }
+                                    },
+                                    "else": {
+                                        "actions": {}
+                                    },
+                                    "runAfter": {
+                                        "HasFilteredResults": [
+                                            "Succeeded"
+                                        ]
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "IfFilterSetChanged": [
+                                    "Succeeded"
+                                ]
                             }
                         }
                     },
                     "outputs": {}
                 },
                 "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azureblob": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('AzureBlobConnectionName'))]",
+                                "connectionName": "[variables('AzureBlobConnectionName')]",
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azureblob')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                }
+                            },
+                            "keyvault": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('AzureKeyVaultConnectionName'))]",
+                                "connectionName": "[variables('AzureKeyVaultConnectionName')]",
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/keyvault')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "StorageAccountName": {
+                        "value": "[parameters('StorageAccountName')]"
+                    },
+                    "StorageAccountContainerName": {
+                        "value": "[parameters('StorageAccountContainerName')]"
+                    },
+                    "BlobNameCursor": {
+                        "value": "cursorCredentialsVerity.txt"
+                    },
+                    "BlobNameFromDate": {
+                        "value": "fromdateCredentialsVerity.txt"
+                    },
                     "ApiURI": {
                         "value": "https://api.intel471.cloud/integrations/creds/v1/credentials/occurrences/stream"
                     },
-                    "VerityUserName": {
-                        "value": "[parameters('VerityUserName')]"
+                    "UsernameSecretName": {
+                        "value": "[if(empty(parameters('KeyVaultUsernameSecretName')), 'VerityUserNameSentinel', parameters('KeyVaultUsernameSecretName'))]"
                     },
-                    "VerityApiKey": {
-                        "value": "[parameters('VerityApiKey')]"
+                    "ApiKeySecretName": {
+                        "value": "[if(empty(parameters('KeyVaultApiKeySecretName')), 'VerityAPIKeySentinel', parameters('KeyVaultApiKeySecretName'))]"
                     },
-                    "FromTimestamp": {
-                        "value": "[parameters('FromTimestamp')]"
+                    "RequestParamFrom": {
+                        "value": "from"
                     },
-                    "Size": {
-                        "value": "[parameters('Size')]"
+                    "RequestParamSize": {
+                        "value": "size"
+                    },
+                    "ResponseFieldCursor": {
+                        "value": "cursor_next"
+                    },
+                    "FilterSetMigration": {
+                        "value": "enabled"
+                    },
+                    "LookBackDays": {
+                        "value": "[parameters('LookBackDays')]"
+                    },
+                    "MigrationMarginHours": {
+                        "value": "[parameters('MigrationMarginHours')]"
                     },
                     "StreamName": {
                         "value": "[variables('StreamName')]"

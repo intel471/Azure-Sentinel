@@ -9,7 +9,8 @@ bitten us at least once.
       from `azuredeploy.json` verbatim — nothing injects the solution version — so a stale value
       ships silently. Both playbooks must carry
       `Intel471-SentinelMalwareIntelligence/<version>` and
-      `Intel471-SentinelMalwareIntelligenceGraph/<version>`, matching the solution version.
+      `Intel471-SentinelCredentialIntelligence/<version>`, matching the solution version. Verify with
+      the `grep` in section 3 — it must print exactly two lines, both on the current version.
 - [ ] **Bump `hidden-SentinelTemplateVersion`** on the `Microsoft.Logic/workflows` resource of
       every playbook whose content changed. The packaging tool reads the playbook template
       version from this tag and defaults to `1.0` when it is missing. If the tag does not move,
@@ -33,6 +34,67 @@ bitten us at least once.
 - [ ] **Hunting query IDs must be globally unique.** Content hub keys hunting queries on their
       `id`, so a GUID reused from another solution collides for any customer with both
       installed. Never copy a query from another solution without reissuing its GUID.
+
+## 1a. The shared pull-loop skeleton
+
+`Intel471-ImportMalwareIntelligenceToSentinel` and `Intel471-ImportCredentialIntelToSentinel` share their
+pull loop. ARM has no include mechanism that survives Content Hub packaging, so the skeleton is **duplicated
+on purpose** and kept diffable by using identical action and workflow-parameter names. These actions are
+byte-identical between the two templates and a fix to one must be applied to the other:
+
+`GetUsername`, `GetApiKey`, `ComputeFilterSetMarker`, `GetCursorFromBlob`, `IfCursorBlobExists`
+(`SetCursorRaw`, `SetCursor`, `IfCursorBlobMissing`, `CreateBlobForCursor`,
+`TerminateOnCursorBlobFailure`), `GetFromDateFromBlob`, `IfFromDateBlobExists` (`SetFromDateFromBlob`,
+`IfFromDateBlobMissing`, `SetFromDate`, `CreateBlobForFromDate`, `TerminateOnFromDateBlobFailure`),
+`IfFilterSetChanged` and all of its children, `HTTP` (bar the `User-Agent`), `CursorNotNull`,
+`UpdateCursor`, `StoreCursor`, `IfUploadFailed`.
+
+`InitVariables` differs only in that the credentials playbook has no `collectedIndicators` variable, and
+`IfUploadFailed` differs only in its `runError`. Verify with:
+
+```bash
+python3 - <<'EOF'
+import json
+def acts(p):
+    d=json.load(open(p)); w=[r for r in d["resources"] if r["type"]=="Microsoft.Logic/workflows"][0]
+    return w["properties"]["definition"]["actions"]
+a=acts("Solutions/Intel471/Playbooks/Intel471-ImportMalwareIntelligenceToSentinel/azuredeploy.json")
+b=acts("Solutions/Intel471/Playbooks/Intel471-ImportCredentialIntelToSentinel/azuredeploy.json")
+for n in ["GetUsername","GetApiKey","ComputeFilterSetMarker","GetCursorFromBlob","IfCursorBlobExists",
+          "GetFromDateFromBlob","IfFromDateBlobExists","IfFilterSetChanged"]:
+    assert json.dumps(a[n],sort_keys=True)==json.dumps(b[n],sort_keys=True), n
+print("shared skeleton identical")
+EOF
+```
+
+The feed-specific actions are deliberately named differently, because a credentials playbook whose actions
+say "Indicators" is a documentation problem: the loop is `CollectAndSubmitOccurrences`, the mapping is
+`MapOccurrences`, and the sink is `PostToDcr` rather than the Sentinel STIX upload.
+
+## 1b. Credentials playbook specifics
+
+- [ ] **The custom table, DCE and DCR live inside the playbook template.** No other playbook in this
+      repository does that - every other DCR in `Azure-Sentinel` sits under `Data Connectors/`. After
+      repackaging, confirm they survived:
+
+      ```bash
+      grep -c 'dataCollectionRules\|dataCollectionEndpoints' Solutions/Intel471/Package/mainTemplate.json
+      ```
+
+      The packaging tool passes unknown resource types through unconditionally
+      (`common/commonFunctions.ps1:1486-1491`), so this should be non-zero. `az deployment group validate`
+      does **not** descend into inline nested templates; `what-if` does, but silently omits a broken nested
+      resource rather than erroring, so check for *presence* of the table:
+
+      ```bash
+      az deployment group what-if -g <rg> --template-file <playbook>/azuredeploy.json --parameters ... \
+        --no-pretty-print --query "changes[?contains(resourceId,'tables')].changeType" -o tsv
+      ```
+
+- [ ] **Never add a plaintext password column.** `password_plain` is deliberately unmapped; Log Analytics has
+      no column-level RBAC.
+- [ ] **Keep the table, the DCR stream declaration and the `MapOccurrences` mapping in lockstep.** All three
+      carry the same 40 columns and a mismatch is rejected at ingest with a `204` and a silent row drop.
 
 ## 2. Repackage with the V3 tool
 

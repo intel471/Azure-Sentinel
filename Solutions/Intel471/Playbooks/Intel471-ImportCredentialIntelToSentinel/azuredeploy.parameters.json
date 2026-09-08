@@ -5,20 +5,32 @@
         "PlaybookName": {
             "value": "Intel471-ImportCredentialIntelToSentinel"
         },
+        "StorageAccountName": {
+            "value": "<storage account holding the cursor blob>"
+        },
+        "StorageAccountContainerName": {
+            "value": "<blob container name>"
+        },
+        "KeyVaultName": {
+            "value": "<key vault holding the Verity credentials>"
+        },
+        "KeyVaultUsernameSecretName": {
+            "value": ""
+        },
+        "KeyVaultApiKeySecretName": {
+            "value": ""
+        },
         "WorkspaceName": {
-            "value": "<your Log Analytics workspace name>"
+            "value": "<Log Analytics workspace name>"
         },
-        "VerityUserName": {
-            "value": "<Verity API Client ID>"
+        "TableRetentionInDays": {
+            "value": -1
         },
-        "VerityApiKey": {
-            "value": "<Verity API Client Secret>"
+        "LookBackDays": {
+            "value": 0
         },
-        "FromTimestamp": {
-            "value": "1756684800000"
-        },
-        "Size": {
-            "value": "100"
+        "MigrationMarginHours": {
+            "value": 1
         }
     }
 }
