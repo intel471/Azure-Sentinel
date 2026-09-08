@@ -1,0 +1,24 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "PlaybookName": {
+            "value": "Intel471-ImportCredentialIntelToSentinel"
+        },
+        "WorkspaceName": {
+            "value": "<your Log Analytics workspace name>"
+        },
+        "VerityUserName": {
+            "value": "<Verity API Client ID>"
+        },
+        "VerityApiKey": {
+            "value": "<Verity API Client Secret>"
+        },
+        "FromTimestamp": {
+            "value": "1756684800000"
+        },
+        "Size": {
+            "value": "100"
+        }
+    }
+}

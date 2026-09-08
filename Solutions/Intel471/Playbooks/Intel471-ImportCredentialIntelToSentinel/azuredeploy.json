@@ -1,0 +1,769 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "title": "Intel 471 Credential Intelligence to Sentinel (iteration 1)",
+        "description": "ITERATION 1 - single manual call. Calls the Verity credential-occurrences stream exactly once with the from and size values you supply, maps the results and writes them to the Intel471CredentialOccurrences_CL custom table. No cursor, no paging, no Key Vault - credentials are template parameters. NOTE ON TIMESTAMPS: TimeGenerated is the time this playbook ingested the row, NOT the time the credential was observed - Azure Monitor overwrites any TimeGenerated older than 2 days with the receipt time, which would make the column mean different things for fresh and backfilled data. Query LastUpdatedTime, FirstSeenTime or LastSeenTime for when the credential was actually seen.",
+        "author": {
+            "name": "Intel 471, Inc."
+        }
+    },
+    "parameters": {
+        "PlaybookName": {
+            "defaultValue": "Intel471-ImportCredentialIntelToSentinel",
+            "type": "String"
+        },
+        "WorkspaceName": {
+            "type": "String",
+            "minLength": 1,
+            "metadata": {
+                "description": "Name of the Log Analytics workspace that will hold the custom table."
+            }
+        },
+        "WorkspaceResourceGroup": {
+            "defaultValue": "",
+            "type": "String",
+            "metadata": {
+                "description": "Resource group of the Log Analytics workspace. Leave empty to use the resource group this template is deployed into."
+            }
+        },
+        "VerityUserName": {
+            "type": "String",
+            "minLength": 1,
+            "metadata": {
+                "description": "ITERATION 1 ONLY - Verity API Client ID, sent as the HTTP Basic user name. Moves to Key Vault in a later iteration."
+            }
+        },
+        "VerityApiKey": {
+            "type": "SecureString",
+            "minLength": 1,
+            "metadata": {
+                "description": "ITERATION 1 ONLY - Verity API Client Secret, sent as the HTTP Basic password. Moves to Key Vault in a later iteration."
+            }
+        },
+        "FromTimestamp": {
+            "type": "String",
+            "minLength": 1,
+            "metadata": {
+                "description": "Passed through to the API as the 'from' query parameter, unchanged. UNIX timestamp in MILLISECONDS (13 digits), e.g. 1756684800000."
+            }
+        },
+        "Size": {
+            "defaultValue": "100",
+            "type": "String",
+            "metadata": {
+                "description": "Passed through to the API as the 'size' query parameter, unchanged. Range 1-1000. Keep at or below 100 for the first runs - the whole page is posted in one request and the Logs Ingestion API caps a request at 1 MB."
+            }
+        }
+    },
+    "variables": {
+        "DceName": "dce-intel471-creds",
+        "DcrName": "dcr-intel471-creds",
+        "TableName": "Intel471CredentialOccurrences_CL",
+        "StreamName": "Custom-Intel471CredentialOccurrences_CL",
+        "WorkspaceRg": "[if(empty(parameters('WorkspaceResourceGroup')), resourceGroup().name, parameters('WorkspaceResourceGroup'))]",
+        "WorkspaceResourceId": "[resourceId(variables('WorkspaceRg'), 'Microsoft.OperationalInsights/workspaces', parameters('WorkspaceName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2021-04-01",
+            "name": "Intel471-CredentialOccurrencesTable",
+            "resourceGroup": "[variables('WorkspaceRg')]",
+            "properties": {
+                "mode": "Incremental",
+                "expressionEvaluationOptions": {
+                    "scope": "inner"
+                },
+                "parameters": {
+                    "workspaceName": {
+                        "value": "[parameters('WorkspaceName')]"
+                    },
+                    "tableName": {
+                        "value": "[variables('TableName')]"
+                    }
+                },
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "workspaceName": {
+                            "type": "string"
+                        },
+                        "tableName": {
+                            "type": "string"
+                        }
+                    },
+                    "resources": [
+                        {
+                            "type": "Microsoft.OperationalInsights/workspaces/tables",
+                            "apiVersion": "2025-07-01",
+                            "name": "[concat(parameters('workspaceName'), '/', parameters('tableName'))]",
+                            "properties": {
+                                "plan": "Analytics",
+                                "schema": {
+                                    "name": "[parameters('tableName')]",
+                                    "columns": [
+                                        {
+                                            "name": "TimeGenerated",
+                                            "type": "datetime"
+                                        },
+                                        {
+                                            "name": "OccurrenceId",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "LastUpdatedTime",
+                                            "type": "datetime"
+                                        },
+                                        {
+                                            "name": "FirstSeenTime",
+                                            "type": "datetime"
+                                        },
+                                        {
+                                            "name": "LastSeenTime",
+                                            "type": "datetime"
+                                        },
+                                        {
+                                            "name": "CredentialId",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "CredentialLogin",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "AccountName",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "AccountUPNSuffix",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "CredentialDomain",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "DetectionDomain",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "Affiliations",
+                                            "type": "dynamic"
+                                        },
+                                        {
+                                            "name": "PasswordId",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "PasswordStrength",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "PasswordLength",
+                                            "type": "int"
+                                        },
+                                        {
+                                            "name": "PasswordEntropy",
+                                            "type": "real"
+                                        },
+                                        {
+                                            "name": "PasswordScore",
+                                            "type": "real"
+                                        },
+                                        {
+                                            "name": "PasswordWeakness",
+                                            "type": "real"
+                                        },
+                                        {
+                                            "name": "PasswordComplexity",
+                                            "type": "dynamic"
+                                        },
+                                        {
+                                            "name": "AccessedDomain",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "AccessedUrl",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "CredentialSetId",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "CredentialSetName",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "CredentialType",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "FilePath",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "SoftwareName",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "MalwareFamily",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "InfectionTime",
+                                            "type": "datetime"
+                                        },
+                                        {
+                                            "name": "MachineId",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "PcName",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "ComputerUsername",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "SourceIP",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "ISP",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "OperatingSystem",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "AntivirusSoftware",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "MalwareInstallPath",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "ScreenshotPath",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "StealerVersion",
+                                            "type": "string"
+                                        },
+                                        {
+                                            "name": "Girs",
+                                            "type": "dynamic"
+                                        },
+                                        {
+                                            "name": "SourceSystem",
+                                            "type": "string"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Insights/dataCollectionEndpoints",
+            "apiVersion": "2023-03-11",
+            "name": "[variables('DceName')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "networkAcls": {
+                    "publicNetworkAccess": "Enabled"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Insights/dataCollectionRules",
+            "apiVersion": "2023-03-11",
+            "name": "[variables('DcrName')]",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))]",
+                "[resourceId('Microsoft.Resources/deployments', 'Intel471-CredentialOccurrencesTable')]"
+            ],
+            "properties": {
+                "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))]",
+                "streamDeclarations": {
+                    "Custom-Intel471CredentialOccurrences_CL": {
+                        "columns": [
+                            {
+                                "name": "TimeGenerated",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "OccurrenceId",
+                                "type": "string"
+                            },
+                            {
+                                "name": "LastUpdatedTime",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "FirstSeenTime",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "LastSeenTime",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "CredentialId",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialLogin",
+                                "type": "string"
+                            },
+                            {
+                                "name": "AccountName",
+                                "type": "string"
+                            },
+                            {
+                                "name": "AccountUPNSuffix",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialDomain",
+                                "type": "string"
+                            },
+                            {
+                                "name": "DetectionDomain",
+                                "type": "string"
+                            },
+                            {
+                                "name": "Affiliations",
+                                "type": "dynamic"
+                            },
+                            {
+                                "name": "PasswordId",
+                                "type": "string"
+                            },
+                            {
+                                "name": "PasswordStrength",
+                                "type": "string"
+                            },
+                            {
+                                "name": "PasswordLength",
+                                "type": "int"
+                            },
+                            {
+                                "name": "PasswordEntropy",
+                                "type": "real"
+                            },
+                            {
+                                "name": "PasswordScore",
+                                "type": "real"
+                            },
+                            {
+                                "name": "PasswordWeakness",
+                                "type": "real"
+                            },
+                            {
+                                "name": "PasswordComplexity",
+                                "type": "dynamic"
+                            },
+                            {
+                                "name": "AccessedDomain",
+                                "type": "string"
+                            },
+                            {
+                                "name": "AccessedUrl",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialSetId",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialSetName",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialType",
+                                "type": "string"
+                            },
+                            {
+                                "name": "FilePath",
+                                "type": "string"
+                            },
+                            {
+                                "name": "SoftwareName",
+                                "type": "string"
+                            },
+                            {
+                                "name": "MalwareFamily",
+                                "type": "string"
+                            },
+                            {
+                                "name": "InfectionTime",
+                                "type": "datetime"
+                            },
+                            {
+                                "name": "MachineId",
+                                "type": "string"
+                            },
+                            {
+                                "name": "PcName",
+                                "type": "string"
+                            },
+                            {
+                                "name": "ComputerUsername",
+                                "type": "string"
+                            },
+                            {
+                                "name": "SourceIP",
+                                "type": "string"
+                            },
+                            {
+                                "name": "ISP",
+                                "type": "string"
+                            },
+                            {
+                                "name": "OperatingSystem",
+                                "type": "string"
+                            },
+                            {
+                                "name": "AntivirusSoftware",
+                                "type": "string"
+                            },
+                            {
+                                "name": "MalwareInstallPath",
+                                "type": "string"
+                            },
+                            {
+                                "name": "ScreenshotPath",
+                                "type": "string"
+                            },
+                            {
+                                "name": "StealerVersion",
+                                "type": "string"
+                            },
+                            {
+                                "name": "Girs",
+                                "type": "dynamic"
+                            },
+                            {
+                                "name": "SourceSystem",
+                                "type": "string"
+                            }
+                        ]
+                    }
+                },
+                "destinations": {
+                    "logAnalytics": [
+                        {
+                            "workspaceResourceId": "[variables('WorkspaceResourceId')]",
+                            "name": "laDestination"
+                        }
+                    ]
+                },
+                "dataFlows": [
+                    {
+                        "streams": [
+                            "Custom-Intel471CredentialOccurrences_CL"
+                        ],
+                        "destinations": [
+                            "laDestination"
+                        ],
+                        "transformKql": "source",
+                        "outputStream": "Custom-Intel471CredentialOccurrences_CL"
+                    }
+                ]
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('PlaybookName')]",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Insights/dataCollectionRules', variables('DcrName'))]"
+            ],
+            "tags": {
+                "LogicAppsCategory": "security",
+                "hidden-SentinelTemplateName": "Intel471-ImportCredentialIntelToSentinel",
+                "hidden-SentinelTemplateVersion": "0.1"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "ApiURI": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "VerityUserName": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "VerityApiKey": {
+                            "defaultValue": "",
+                            "type": "SecureString"
+                        },
+                        "FromTimestamp": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "Size": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "DataCollectionEndpoint": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "DcrImmutableId": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "StreamName": {
+                            "defaultValue": "",
+                            "type": "String"
+                        }
+                    },
+                    "triggers": {
+                        "manual": {
+                            "type": "Request",
+                            "kind": "Http",
+                            "inputs": {
+                                "schema": {}
+                            }
+                        }
+                    },
+                    "actions": {
+                        "CallVerity": {
+                            "type": "Http",
+                            "runAfter": {},
+                            "inputs": {
+                                "method": "GET",
+                                "uri": "@parameters('ApiURI')",
+                                "headers": {
+                                    "User-Agent": "Intel471-SentinelCredentialIntelligence/0.1"
+                                },
+                                "queries": {
+                                    "from": "@parameters('FromTimestamp')",
+                                    "size": "@parameters('Size')"
+                                },
+                                "authentication": {
+                                    "type": "Basic",
+                                    "username": "@parameters('VerityUserName')",
+                                    "password": "@parameters('VerityApiKey')"
+                                }
+                            }
+                        },
+                        "Parse_JSON": {
+                            "type": "ParseJson",
+                            "runAfter": {
+                                "CallVerity": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "inputs": {
+                                "content": "@body('CallVerity')",
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "count": {
+                                            "type": "integer"
+                                        },
+                                        "cursor_next": {
+                                            "type": "string"
+                                        },
+                                        "credential_occurrences": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "MapOccurrences": {
+                            "type": "Select",
+                            "runAfter": {
+                                "Parse_JSON": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "inputs": {
+                                "from": "@coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]'))",
+                                "select": {
+                                    "TimeGenerated": "@utcNow()",
+                                    "OccurrenceId": "@item()?['id']",
+                                    "LastUpdatedTime": "@item()?['last_updated_ts']",
+                                    "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
+                                    "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
+                                    "CredentialId": "@item()?['data']?['credential']?['id']",
+                                    "CredentialLogin": "@item()?['data']?['credential']?['credential_login']",
+                                    "AccountName": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential']?['credential_login'], ''))",
+                                    "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')), '')",
+                                    "CredentialDomain": "@item()?['data']?['credential']?['credential_domain']",
+                                    "DetectionDomain": "@item()?['data']?['credential']?['detection_domain']",
+                                    "Affiliations": "@item()?['data']?['credential']?['affiliations']",
+                                    "PasswordId": "@item()?['data']?['credential']?['password']?['id']",
+                                    "PasswordStrength": "@item()?['data']?['credential']?['password']?['strength']",
+                                    "PasswordLength": "@item()?['data']?['credential']?['password']?['complexity']?['length']",
+                                    "PasswordEntropy": "@item()?['data']?['credential']?['password']?['complexity']?['entropy']",
+                                    "PasswordScore": "@item()?['data']?['credential']?['password']?['complexity']?['score']",
+                                    "PasswordWeakness": "@item()?['data']?['credential']?['password']?['complexity']?['weakness']",
+                                    "PasswordComplexity": "@item()?['data']?['credential']?['password']?['complexity']",
+                                    "AccessedDomain": "@item()?['data']?['accessed_domain']",
+                                    "AccessedUrl": "@item()?['data']?['accessed_url']",
+                                    "CredentialSetId": "@item()?['data']?['credential_set']?['id']",
+                                    "CredentialSetName": "@item()?['data']?['credential_set']?['name']",
+                                    "CredentialType": "@item()?['data']?['credential_type']",
+                                    "FilePath": "@item()?['data']?['file_path']",
+                                    "SoftwareName": "@item()?['data']?['software_name']",
+                                    "MalwareFamily": "@item()?['data']?['info_stealer']?['malware_family']",
+                                    "InfectionTime": "@item()?['data']?['info_stealer']?['infection_ts']",
+                                    "MachineId": "@item()?['data']?['info_stealer']?['machine_id']",
+                                    "PcName": "@item()?['data']?['info_stealer']?['pc_name']",
+                                    "ComputerUsername": "@item()?['data']?['info_stealer']?['computer_username']",
+                                    "SourceIP": "@item()?['data']?['info_stealer']?['ip']",
+                                    "ISP": "@item()?['data']?['info_stealer']?['isp']",
+                                    "OperatingSystem": "@item()?['data']?['info_stealer']?['os']",
+                                    "AntivirusSoftware": "@item()?['data']?['info_stealer']?['antivirus_software']",
+                                    "MalwareInstallPath": "@item()?['data']?['info_stealer']?['malware_install_path']",
+                                    "ScreenshotPath": "@item()?['data']?['info_stealer']?['screenshot_path']",
+                                    "StealerVersion": "@item()?['data']?['info_stealer']?['version']",
+                                    "Girs": "@item()?['classification']?['girs']",
+                                    "SourceSystem": "Intel 471 Verity"
+                                }
+                            }
+                        },
+                        "HasOccurrences": {
+                            "type": "If",
+                            "runAfter": {
+                                "MapOccurrences": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@empty(body('MapOccurrences'))",
+                                            false
+                                        ]
+                                    }
+                                ]
+                            },
+                            "actions": {
+                                "PostToDcr": {
+                                    "type": "Http",
+                                    "runAfter": {},
+                                    "inputs": {
+                                        "method": "POST",
+                                        "uri": "@{concat(parameters('DataCollectionEndpoint'), '/dataCollectionRules/', parameters('DcrImmutableId'), '/streams/', parameters('StreamName'), '?api-version=2023-01-01')}",
+                                        "headers": {
+                                            "Content-Type": "application/json"
+                                        },
+                                        "body": "@body('MapOccurrences')",
+                                        "authentication": {
+                                            "type": "ManagedServiceIdentity",
+                                            "audience": "https://monitor.azure.com"
+                                        }
+                                    }
+                                },
+                                "ReportIngested": {
+                                    "type": "Compose",
+                                    "runAfter": {
+                                        "PostToDcr": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "inputs": {
+                                        "event": "Intel471CredentialsIngested",
+                                        "requestedSize": "@{parameters('Size')}",
+                                        "requestedFrom": "@{parameters('FromTimestamp')}",
+                                        "totalMatchingCount": "@{body('Parse_JSON')?['count']}",
+                                        "returnedOnThisPage": "@{length(coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]')))}",
+                                        "rowsPosted": "@{length(body('MapOccurrences'))}",
+                                        "cursorNextIgnored": "@{body('Parse_JSON')?['cursor_next']}",
+                                        "table": "@{parameters('StreamName')}"
+                                    }
+                                }
+                            },
+                            "else": {
+                                "actions": {
+                                    "ReportNothingReturned": {
+                                        "type": "Compose",
+                                        "inputs": {
+                                            "event": "Intel471NoCredentialsReturned",
+                                            "requestedFrom": "@{parameters('FromTimestamp')}",
+                                            "requestedSize": "@{parameters('Size')}",
+                                            "totalMatchingCount": "@{body('Parse_JSON')?['count']}",
+                                            "hint": "A count of 0 usually means the from timestamp is in the future, or is in seconds rather than milliseconds, or the account has no credential data in that window."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "ApiURI": {
+                        "value": "https://api.intel471.cloud/integrations/creds/v1/credentials/occurrences/stream"
+                    },
+                    "VerityUserName": {
+                        "value": "[parameters('VerityUserName')]"
+                    },
+                    "VerityApiKey": {
+                        "value": "[parameters('VerityApiKey')]"
+                    },
+                    "FromTimestamp": {
+                        "value": "[parameters('FromTimestamp')]"
+                    },
+                    "Size": {
+                        "value": "[parameters('Size')]"
+                    },
+                    "StreamName": {
+                        "value": "[variables('StreamName')]"
+                    },
+                    "DataCollectionEndpoint": {
+                        "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))).logsIngestion.endpoint]"
+                    },
+                    "DcrImmutableId": {
+                        "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', variables('DcrName'))).immutableId]"
+                    }
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "logicAppPrincipalId": {
+            "type": "String",
+            "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2017-07-01', 'Full').identity.principalId]"
+        },
+        "dataCollectionRuleId": {
+            "type": "String",
+            "value": "[resourceId('Microsoft.Insights/dataCollectionRules', variables('DcrName'))]"
+        },
+        "dataCollectionEndpoint": {
+            "type": "String",
+            "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))).logsIngestion.endpoint]"
+        },
+        "tableName": {
+            "type": "String",
+            "value": "[variables('TableName')]"
+        }
+    }
+}
