@@ -46,7 +46,8 @@
                     "The CredentialSource parameter selects unique credentials (default) or individual sightings. Both write the same table, tagged with a RecordType column, and each keeps its own cursor so the source can be changed without losing position or rebuilding the table.",
                     "Plaintext passwords are never ingested. Password strength, length, entropy, score, weakness and per-character-class counts are.",
                     "TimeGenerated is the ingestion time, not the credential observation time, because Azure Monitor rewrites any TimeGenerated older than two days. Observation times are in LastUpdatedTime, FirstSeenTime, LastSeenTime and InfectionTime.",
-                    "Paging, cursor persistence and filter-set migration behave exactly as in the Intel 471 Malware Intelligence playbook version 3.1."
+                    "Paging, cursor persistence and filter-set migration behave exactly as in the Intel 471 Malware Intelligence playbook version 3.1.",
+                    "The Key Vault steps do not record their outputs in the run history, so the Verity Client Secret is not readable from a run."
                 ]
             }
         ]
@@ -824,7 +825,14 @@
                                 "method": "get",
                                 "path": "/secrets/@{encodeURIComponent(parameters('UsernameSecretName'))}/value"
                             },
-                            "runAfter": {}
+                            "runAfter": {},
+                            "runtimeConfiguration": {
+                                "secureData": {
+                                    "properties": [
+                                        "outputs"
+                                    ]
+                                }
+                            }
                         },
                         "GetApiKey": {
                             "type": "ApiConnection",
@@ -841,6 +849,13 @@
                                 "GetUsername": [
                                     "Succeeded"
                                 ]
+                            },
+                            "runtimeConfiguration": {
+                                "secureData": {
+                                    "properties": [
+                                        "outputs"
+                                    ]
+                                }
                             }
                         },
                         "InitVariables": {
