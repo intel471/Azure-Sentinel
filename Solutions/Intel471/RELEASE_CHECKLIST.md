@@ -68,8 +68,9 @@ EOF
 ```
 
 The feed-specific actions are deliberately named differently, because a credentials playbook whose actions
-say "Indicators" is a documentation problem: the loop is `CollectAndSubmitOccurrences`, the mapping is
-`MapOccurrences`, and the sink is `PostToDcr` rather than the Sentinel STIX upload.
+say "Indicators" is a documentation problem: the loop is `CollectAndSubmitCredentials`, the mappings are
+`MapOccurrences` / `MapCredentials` behind a `SourceIsOccurrences` branch (mirroring the malware playbook's
+`BackendIsVerity`), and the sink is `PostToDcr` rather than the Sentinel STIX upload.
 
 ## 1b. Credentials playbook specifics
 
@@ -93,8 +94,27 @@ say "Indicators" is a documentation problem: the loop is `CollectAndSubmitOccurr
 
 - [ ] **Never add a plaintext password column.** `password_plain` is deliberately unmapped; Log Analytics has
       no column-level RBAC.
-- [ ] **Keep the table, the DCR stream declaration and the `MapOccurrences` mapping in lockstep.** All three
-      carry the same 40 columns and a mismatch is rejected at ingest with a `204` and a silent row drop.
+- [ ] **Keep the table, the DCR stream declaration and BOTH mappings in lockstep.** All four carry the same
+      44 columns, in the same order, and a mismatch is rejected at ingest with a `204` and a silent row drop.
+      The schema is the union of the two sources, so a column may be populated by only one mapping - but it
+      must still be present in both. Verify with:
+
+      ```bash
+      python3 - <<'EOF'
+      import json
+      d=json.load(open("Solutions/Intel471/Playbooks/Intel471-ImportCredentialIntelToSentinel/azuredeploy.json"))
+      nest=[r for r in d["resources"] if r["type"]=="Microsoft.Resources/deployments"][0]
+      tbl=[c["name"] for c in nest["properties"]["template"]["resources"][0]["properties"]["schema"]["columns"]]
+      dcr=[r for r in d["resources"] if r["type"].endswith("dataCollectionRules")][0]
+      strm=[c["name"] for c in list(dcr["properties"]["streamDeclarations"].values())[0]["columns"]]
+      w=[r for r in d["resources"] if r["type"]=="Microsoft.Logic/workflows"][0]
+      br=w["properties"]["definition"]["actions"]["CollectAndSubmitCredentials"]["actions"]["SourceIsOccurrences"]
+      occ=list(br["actions"]["MapOccurrences"]["inputs"]["select"])
+      cre=list(br["else"]["actions"]["MapCredentials"]["inputs"]["select"])
+      assert tbl==strm==occ==cre, "schema drift"
+      print(f"{len(tbl)} columns aligned across table, stream and both mappings")
+      EOF
+      ```
 
 ## 2. Repackage with the V3 tool
 

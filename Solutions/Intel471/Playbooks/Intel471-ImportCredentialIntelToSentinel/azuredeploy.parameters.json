@@ -5,6 +5,9 @@
         "PlaybookName": {
             "value": "Intel471-ImportCredentialIntelToSentinel"
         },
+        "CredentialSource": {
+            "value": "Credentials"
+        },
         "StorageAccountName": {
             "value": "<storage account holding the cursor blob>"
         },

@@ -3,11 +3,11 @@
     "contentVersion": "1.0.0.0",
     "metadata": {
         "title": "Intel 471 Credential Intelligence to Sentinel",
-        "description": "This playbook ingests compromised credential occurrences from Intel 471's Verity 471 Credentials API into a custom Microsoft Sentinel table using the Azure Monitor Logs Ingestion API. Each row is one sighting of a credential, carrying the login, the monitored domain, password strength and complexity metadata, the credential set it came from, and the information stealer and infected host that captured it. Plaintext passwords are never ingested. NOTE ON TIMESTAMPS: TimeGenerated is the time this playbook ingested the row, not the time the credential was observed - query LastUpdatedTime, FirstSeenTime or LastSeenTime for that. See the playbook README for the full column reference.",
+        "description": "This playbook ingests compromised credentials from Intel 471's Verity 471 Credential Intelligence API into a custom Microsoft Sentinel table using the Azure Monitor Logs Ingestion API. Choose at deployment whether to pull unique credentials (default) or individual sightings - both land in the same table, tagged with a RecordType column, so the choice can be revisited without rebuilding anything. Rows carry the login, the monitored domain, password strength and complexity metadata, the credential sets involved, and the information stealer and infected host that captured the credential. Plaintext passwords are never ingested. NOTE ON TIMESTAMPS: TimeGenerated is the time this playbook ingested the row, not the time the credential was observed - query LastUpdatedTime, FirstSeenTime or LastSeenTime for that. See the playbook README for the full column reference.",
         "prerequisites": [
             "1. An active account in the Verity 471 platform, which is available as part of Intel 471's subscriptions. For more information, please contact sales@intel471.com. Credential Intelligence must be included in your subscription and the domains you want monitored must already be registered with Intel 471.",
             "2. API credentials. The Client ID and Client Secret issued in the Intel 471 portal - the Client ID is used as the API user name and the Client Secret as the API key.",
-            "3. Pre-existing [Key Vault](https://docs.microsoft.com/azure/key-vault/general/basic-concepts) for securely storing API credentials. By default the playbook reads the secrets `VerityUserNameSentinel` and `VerityAPIKeySentinel`. The credentials are never entered on the deployment screen - store them in the Key Vault first. If your secrets use different names, pass those names in the optional `KeyVaultUsernameSecretName` and `KeyVaultApiKeySecretName` parameters.",
+            "3. Pre-existing [Key Vault](https://docs.microsoft.com/azure/key-vault/general/basic-concepts) for securely storing API credentials. By default the playbook reads the secrets `VerityUserNameSentinel` and `VerityAPIKeySentinel` - the same secrets the Intel 471 Malware Intelligence playbook uses. The credentials are never entered on the deployment screen - store them in the Key Vault first. If your secrets use different names, pass those names in the optional `KeyVaultUsernameSecretName` and `KeyVaultApiKeySecretName` parameters.",
             "4. Pre-existing [Storage account](https://learn.microsoft.com/azure/storage/common/storage-account-overview) with a blob container already created, for persisting the stream cursor between runs. It can be the same container the Intel 471 Malware Intelligence playbook uses - the blob names do not collide.",
             "5. The name and resource group of the Log Analytics workspace that will hold the data. This playbook creates the custom table, the data collection endpoint and the data collection rule itself; nothing needs to be prepared in the workspace beforehand."
         ],
@@ -18,7 +18,7 @@
             "4. Optionally change the schedule's frequency in `Recurrence` block (the first one).",
             "5. Optionally add Verity API filters - for example `affiliation_group`, `password_strength` or `password_length_gte` - to the `payload` variable in the `InitVariables` action. Changing filters invalidates the stored cursor; the playbook detects this and re-ingests with an overlap. See the playbook README."
         ],
-        "lastUpdateTime": "2026-09-08T00:00:00.000Z",
+        "lastUpdateTime": "2026-09-17T00:00:00.000Z",
         "entities": [
             "account",
             "ip",
@@ -42,10 +42,11 @@
                 "title": "Intel 471 Credential Intelligence to Sentinel",
                 "notes": [
                     "Initial version.",
-                    "Ingests credential occurrences from the Verity 471 Credentials API into the Intel471CredentialOccurrences_CL custom table through the Azure Monitor Logs Ingestion API. The custom table, data collection endpoint and data collection rule are all created by this template.",
+                    "Ingests compromised credentials from the Verity 471 Credential Intelligence API into the Intel471Credentials_CL custom table through the Azure Monitor Logs Ingestion API. The custom table, data collection endpoint and data collection rule are all created by this template.",
+                    "The CredentialSource parameter selects unique credentials (default) or individual sightings. Both write the same table, tagged with a RecordType column, and each keeps its own cursor so the source can be changed without losing position or rebuilding the table.",
                     "Plaintext passwords are never ingested. Password strength, length, entropy, score, weakness and per-character-class counts are.",
                     "TimeGenerated is the ingestion time, not the credential observation time, because Azure Monitor rewrites any TimeGenerated older than two days. Observation times are in LastUpdatedTime, FirstSeenTime, LastSeenTime and InfectionTime.",
-                    "Paging, cursor persistence and filter-set migration behave exactly as in the Intel 471 Malware Intelligence playbook version 3.1: the cursor is stored only after a page has been written, an ingestion failure terminates the run instead of silently skipping a page, and the cursor blob records the request filters it was issued for so that changing them triggers a bounded re-ingest rather than a silent gap."
+                    "Paging, cursor persistence and filter-set migration behave exactly as in the Intel 471 Malware Intelligence playbook version 3.1."
                 ]
             }
         ]
@@ -56,6 +57,17 @@
             "type": "String",
             "metadata": {
                 "description": "Name of the logic app to create. Also used as a suffix for the API connection names."
+            }
+        },
+        "CredentialSource": {
+            "defaultValue": "Credentials",
+            "type": "String",
+            "allowedValues": [
+                "Credentials",
+                "Occurrences"
+            ],
+            "metadata": {
+                "description": "Which Verity credential endpoint to pull from. CREDENTIALS (default, /credentials/stream): one row per unique credential - login, password and accessed domain grouped together. Lower volume, and the right choice for 'which of our accounts are exposed'. Information stealer details are aggregated across every sighting, so several malware families or machines may be collapsed into one row. OCCURRENCES (/credentials/occurrences/stream): one row per sighting of a credential. Roughly 1.6x the volume, and the only source that correlates a single infected machine with the stealer, IP, file path and application that captured the credential - the right choice for infostealer host hunting. Both write to the same table, tagged with a RecordType column, so you can change this later and keep appending, and each source keeps its own cursor so switching does not lose your position in the other. Occurrences carries every field Credentials carries, repeated once per sighting, so if you need both the identity view and the forensic detail select Occurrences and deduplicate by CredentialId - do not deploy the template twice."
             }
         },
         "StorageAccountName": {
@@ -97,7 +109,7 @@
             "type": "String",
             "minLength": 4,
             "metadata": {
-                "description": "Name of the Log Analytics workspace that will hold the Intel471CredentialOccurrences_CL custom table."
+                "description": "Name of the Log Analytics workspace that will hold the Intel471Credentials_CL custom table. This is the workspace NAME, not the workspace ID - the table and the data collection rule are addressed by ARM resource id, which is built from subscription, resource group and name."
             }
         },
         "WorkspaceResourceGroup": {
@@ -113,7 +125,7 @@
             "minValue": -1,
             "maxValue": 730,
             "metadata": {
-                "description": "Retention for the custom table in days. Leave -1 to inherit the workspace default. Credential occurrences fan out - one credential seen in three sets produces three rows - so this is the main cost lever."
+                "description": "Retention for the custom table in days. Leave -1 to inherit the workspace default. Occurrences fan out - one credential seen in three sets produces three rows - so this is the main cost lever when CredentialSource is Occurrences."
             }
         },
         "LookBackDays": {
@@ -122,7 +134,7 @@
             "minValue": 0,
             "maxValue": 365,
             "metadata": {
-                "description": "How many days of history should be pulled on the first run. Leave 0 to start from the current time. Occurrences are high volume; start small and raise it once you have seen the ingestion rate."
+                "description": "How many days of history should be pulled on the first run. Leave 0 to start from the current time. Start small and raise it once you have seen the ingestion rate."
             }
         },
         "MigrationMarginHours": {
@@ -131,7 +143,7 @@
             "minValue": 0,
             "maxValue": 8760,
             "metadata": {
-                "description": "Safety margin, in hours, applied when the playbook detects that its request filters changed - for example after an upgrade, or after the filters were edited by hand. A stored cursor is only valid for the filter set it was issued against, so it is discarded and the from-date is moved back to this many hours before the discarded cursor's position. The margin is needed because the credential occurrence stream is ordered by last_updated_ts while the from-date filters activity time, so occurrences updated later than they were first observed would otherwise be skipped. Larger values close a bigger publish-lag gap at the cost of re-ingesting more overlapping indicators. Raise it for a single run when a filter change widens what is ingested and you want history for the newly included data."
+                "description": "Safety margin, in hours, applied when the playbook detects that its request filters changed - for example after an upgrade, or after the filters were edited by hand. A stored cursor is only valid for the filter set it was issued against, so it is discarded and the from-date is moved back to this many hours before the discarded cursor's position. The margin is needed because the credential stream is ordered by last_updated_ts while the from-date filters activity time, so records updated later than they were first observed would otherwise be skipped. Larger values close a bigger publish-lag gap at the cost of re-ingesting more overlapping indicators. Raise it for a single run when a filter change widens what is ingested and you want history for the newly included data."
             }
         }
     },
@@ -139,11 +151,12 @@
         "AzureBlobConnectionName": "[concat('azureblob-', parameters('PlaybookName'))]",
         "AzureKeyVaultName": "[parameters('KeyVaultName')]",
         "AzureKeyVaultConnectionName": "[concat('keyvault-', parameters('PlaybookName'))]",
+        "IsOccurrences": "[equals(parameters('CredentialSource'), 'Occurrences')]",
         "DceName": "dce-intel471-creds",
         "DcrName": "dcr-intel471-creds",
-        "TableName": "Intel471CredentialOccurrences_CL",
-        "StreamName": "Custom-Intel471CredentialOccurrences_CL",
-        "TableDeploymentName": "Intel471-CredentialOccurrencesTable",
+        "TableName": "Intel471Credentials_CL",
+        "StreamName": "Custom-Intel471Credentials_CL",
+        "TableDeploymentName": "Intel471-CredentialsTable",
         "WorkspaceRg": "[if(empty(parameters('WorkspaceResourceGroup')), resourceGroup().name, parameters('WorkspaceResourceGroup'))]",
         "WorkspaceResourceId": "[resourceId(variables('WorkspaceRg'), 'Microsoft.OperationalInsights/workspaces', parameters('WorkspaceName'))]"
     },
@@ -200,14 +213,24 @@
                                             "description": "Time this playbook ingested the row - NOT when the credential was seen. Use LastUpdatedTime for that."
                                         },
                                         {
+                                            "name": "RecordType",
+                                            "type": "string",
+                                            "description": "Which endpoint produced this row: 'occurrence' (one sighting) or 'credential' (one unique credential, aggregated across its sightings). Always filter or group by this when a table holds both."
+                                        },
+                                        {
+                                            "name": "CredentialId",
+                                            "type": "string",
+                                            "description": "Unique credential identifier. Stable across both record types, so it joins credential rows to occurrence rows."
+                                        },
+                                        {
                                             "name": "OccurrenceId",
                                             "type": "string",
-                                            "description": "Unique credential occurrence identifier."
+                                            "description": "Unique sighting identifier. Populated only when RecordType is 'occurrence'."
                                         },
                                         {
                                             "name": "LastUpdatedTime",
                                             "type": "datetime",
-                                            "description": "Occurrence last modification date. The field the stream is ordered and cursored by."
+                                            "description": "Record last modification date. The field the stream is ordered and cursored by."
                                         },
                                         {
                                             "name": "FirstSeenTime",
@@ -218,11 +241,6 @@
                                             "name": "LastSeenTime",
                                             "type": "datetime",
                                             "description": "End of the credential activity range."
-                                        },
-                                        {
-                                            "name": "CredentialId",
-                                            "type": "string",
-                                            "description": "Unique credential identifier. Multiple occurrences share one credential."
                                         },
                                         {
                                             "name": "CredentialLogin",
@@ -257,7 +275,7 @@
                                         {
                                             "name": "PasswordId",
                                             "type": "string",
-                                            "description": "Opaque password identifier. Equal ids mean equal passwords - useful for finding shared passwords."
+                                            "description": "Opaque password identifier. Equal ids mean equal passwords - use it to find shared passwords."
                                         },
                                         {
                                             "name": "PasswordStrength",
@@ -297,92 +315,107 @@
                                         {
                                             "name": "AccessedUrl",
                                             "type": "string",
-                                            "description": "URL the victim was logging in to."
+                                            "description": "URL the victim was logging in to. Deprecated on the credentials endpoint, where it mirrors AccessedDomain."
+                                        },
+                                        {
+                                            "name": "CredentialSets",
+                                            "type": "dynamic",
+                                            "description": "Every credential set this record belongs to, as an array of {id, name}. Populated for both record types - a single-element array for occurrences. A credential can belong to several sets."
                                         },
                                         {
                                             "name": "CredentialSetId",
                                             "type": "string",
-                                            "description": "Identifier of the credential set this sighting came from."
+                                            "description": "Identifier of the single credential set this sighting came from. Occurrence rows only; credential rows can belong to several, see CredentialSets."
                                         },
                                         {
                                             "name": "CredentialSetName",
                                             "type": "string",
-                                            "description": "Name of the credential set."
+                                            "description": "Name of the credential set. Occurrence rows only, see CredentialSets."
                                         },
                                         {
-                                            "name": "CredentialType",
-                                            "type": "string",
-                                            "description": "Type of the credential set, e.g. infostealer."
+                                            "name": "CredentialTypes",
+                                            "type": "dynamic",
+                                            "description": "Types of the credential sets involved, e.g. infostealer. Array for both record types."
                                         },
                                         {
                                             "name": "FilePath",
                                             "type": "string",
-                                            "description": "Path of the file within the credential set that held this occurrence."
+                                            "description": "Path of the file within the credential set that held this sighting. Occurrence rows only."
                                         },
                                         {
                                             "name": "SoftwareName",
                                             "type": "string",
-                                            "description": "Application the credential was stolen from, e.g. Chrome (Profile 1)."
+                                            "description": "Application the credential was stolen from, e.g. Chrome (Profile 1). Occurrence rows only."
+                                        },
+                                        {
+                                            "name": "AccessedDomainsCount",
+                                            "type": "int",
+                                            "description": "Number of distinct accessed domains for this credential. Credential rows only."
                                         },
                                         {
                                             "name": "MalwareFamily",
                                             "type": "string",
-                                            "description": "Information stealer family, e.g. Redline, Lumma, VIDAR."
+                                            "description": "Information stealer family, e.g. Redline, Lumma, VIDAR. On credential rows this aggregates every family that captured the credential, comma separated - usually a single value."
                                         },
                                         {
                                             "name": "InfectionTime",
                                             "type": "datetime",
-                                            "description": "When the host was infected."
+                                            "description": "When the host was infected. Occurrence rows only - credential rows aggregate several, see the InfoStealer column."
                                         },
                                         {
                                             "name": "MachineId",
                                             "type": "string",
-                                            "description": "Identifier of the infected machine."
+                                            "description": "Identifier of the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "PcName",
                                             "type": "string",
-                                            "description": "Host name of the infected machine."
+                                            "description": "Host name of the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "ComputerUsername",
                                             "type": "string",
-                                            "description": "Local user account on the infected machine."
+                                            "description": "Local user account on the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "SourceIP",
                                             "type": "string",
-                                            "description": "IP address of the infected machine."
+                                            "description": "IP address of the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "ISP",
                                             "type": "string",
-                                            "description": "Internet service provider of the infected machine."
+                                            "description": "Internet service provider of the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "OperatingSystem",
                                             "type": "string",
-                                            "description": "Operating system of the infected machine."
+                                            "description": "Operating system of the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "AntivirusSoftware",
                                             "type": "string",
-                                            "description": "Antivirus reported on the infected machine."
+                                            "description": "Antivirus reported on the infected machine. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "MalwareInstallPath",
                                             "type": "string",
-                                            "description": "Installation path of the stealer."
+                                            "description": "Installation path of the stealer. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "ScreenshotPath",
                                             "type": "string",
-                                            "description": "Path of the screenshot captured by the stealer."
+                                            "description": "Path of the screenshot captured by the stealer. Comma separated on credential rows."
                                         },
                                         {
                                             "name": "StealerVersion",
                                             "type": "string",
-                                            "description": "Version of the stealer."
+                                            "description": "Version of the stealer. Comma separated on credential rows."
+                                        },
+                                        {
+                                            "name": "InfoStealer",
+                                            "type": "dynamic",
+                                            "description": "The raw info_stealer object exactly as the API returned it - scalars on occurrence rows, parallel arrays on credential rows. Lossless escape hatch for anything the flattened columns above cannot express."
                                         },
                                         {
                                             "name": "Girs",
@@ -425,11 +458,19 @@
             "properties": {
                 "dataCollectionEndpointId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', variables('DceName'))]",
                 "streamDeclarations": {
-                    "Custom-Intel471CredentialOccurrences_CL": {
+                    "Custom-Intel471Credentials_CL": {
                         "columns": [
                             {
                                 "name": "TimeGenerated",
                                 "type": "datetime"
+                            },
+                            {
+                                "name": "RecordType",
+                                "type": "string"
+                            },
+                            {
+                                "name": "CredentialId",
+                                "type": "string"
                             },
                             {
                                 "name": "OccurrenceId",
@@ -446,10 +487,6 @@
                             {
                                 "name": "LastSeenTime",
                                 "type": "datetime"
-                            },
-                            {
-                                "name": "CredentialId",
-                                "type": "string"
                             },
                             {
                                 "name": "CredentialLogin",
@@ -512,6 +549,10 @@
                                 "type": "string"
                             },
                             {
+                                "name": "CredentialSets",
+                                "type": "dynamic"
+                            },
+                            {
                                 "name": "CredentialSetId",
                                 "type": "string"
                             },
@@ -520,8 +561,8 @@
                                 "type": "string"
                             },
                             {
-                                "name": "CredentialType",
-                                "type": "string"
+                                "name": "CredentialTypes",
+                                "type": "dynamic"
                             },
                             {
                                 "name": "FilePath",
@@ -530,6 +571,10 @@
                             {
                                 "name": "SoftwareName",
                                 "type": "string"
+                            },
+                            {
+                                "name": "AccessedDomainsCount",
+                                "type": "int"
                             },
                             {
                                 "name": "MalwareFamily",
@@ -580,6 +625,10 @@
                                 "type": "string"
                             },
                             {
+                                "name": "InfoStealer",
+                                "type": "dynamic"
+                            },
+                            {
                                 "name": "Girs",
                                 "type": "dynamic"
                             },
@@ -601,13 +650,13 @@
                 "dataFlows": [
                     {
                         "streams": [
-                            "Custom-Intel471CredentialOccurrences_CL"
+                            "Custom-Intel471Credentials_CL"
                         ],
                         "destinations": [
                             "laDestination"
                         ],
                         "transformKql": "source",
-                        "outputStream": "Custom-Intel471CredentialOccurrences_CL"
+                        "outputStream": "Custom-Intel471Credentials_CL"
                     }
                 ]
             }
@@ -728,6 +777,14 @@
                             "defaultValue": 0,
                             "type": "int"
                         },
+                        "ResponseFieldItems": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
+                        "RecordType": {
+                            "defaultValue": "",
+                            "type": "String"
+                        },
                         "DataCollectionEndpoint": {
                             "defaultValue": "",
                             "type": "String"
@@ -817,6 +874,11 @@
                                         "name": "uploadError",
                                         "type": "string",
                                         "value": "none"
+                                    },
+                                    {
+                                        "name": "collectedRecords",
+                                        "type": "array",
+                                        "value": []
                                     },
                                     {
                                         "name": "payload",
@@ -1278,7 +1340,7 @@
                                         "runStatus": "Failed",
                                         "runError": {
                                             "code": "CredentialUploadFailed",
-                                            "message": "Posting credential occurrences to the Logs Ingestion API failed with @{variables('uploadError')}. The cursor was not advanced, so the next run retries the same page. HTTP 403 almost always means the logic app's managed identity is missing the 'Monitoring Metrics Publisher' role on the data collection rule - note that Azure documents up to 30 minutes for that assignment to take effect, and that recreating either the logic app or the DCR invalidates it. HTTP 413 means the page is too large for a single request - lower the size value in the payload variable of InitVariables. See the Troubleshooting section of the playbook README."
+                                            "message": "Posting records to the Logs Ingestion API failed with @{variables('uploadError')}. The cursor was not advanced, so the next run retries the same page. HTTP 403 almost always means the logic app's managed identity is missing the 'Monitoring Metrics Publisher' role on the data collection rule - Azure documents up to 30 minutes for that assignment to take effect, and recreating either the logic app or the DCR invalidates it. HTTP 413 means the page is too large for a single request - lower the size value in the payload variable of InitVariables. See the Troubleshooting section of the playbook README."
                                         }
                                     }
                                 }
@@ -1296,12 +1358,12 @@
                                 }
                             },
                             "runAfter": {
-                                "CollectAndSubmitOccurrences": [
+                                "CollectAndSubmitCredentials": [
                                     "Succeeded"
                                 ]
                             }
                         },
-                        "CollectAndSubmitOccurrences": {
+                        "CollectAndSubmitCredentials": {
                             "type": "Until",
                             "expression": "@equals(variables('hasResults'), false)",
                             "limit": {
@@ -1338,6 +1400,12 @@
                                                 "cursor_next": {
                                                     "type": "string"
                                                 },
+                                                "credentials": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object"
+                                                    }
+                                                },
                                                 "credential_occurrences": {
                                                     "type": "array",
                                                     "items": {
@@ -1357,7 +1425,7 @@
                                     "type": "SetVariable",
                                     "inputs": {
                                         "name": "hasResults",
-                                        "value": "@not(empty(body('Parse_JSON')?['credential_occurrences']))"
+                                        "value": "@not(empty(body('Parse_JSON')?[parameters('ResponseFieldItems')]))"
                                     },
                                     "runAfter": {
                                         "Parse_JSON": [
@@ -1365,51 +1433,150 @@
                                         ]
                                     }
                                 },
-                                "MapOccurrences": {
-                                    "type": "Select",
-                                    "inputs": {
-                                        "from": "@coalesce(body('Parse_JSON')?['credential_occurrences'], json('[]'))",
-                                        "select": {
-                                            "TimeGenerated": "@utcNow()",
-                                            "OccurrenceId": "@item()?['id']",
-                                            "LastUpdatedTime": "@item()?['last_updated_ts']",
-                                            "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
-                                            "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
-                                            "CredentialId": "@item()?['data']?['credential']?['id']",
-                                            "CredentialLogin": "@item()?['data']?['credential']?['credential_login']",
-                                            "AccountName": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential']?['credential_login'], ''))",
-                                            "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')), '')",
-                                            "CredentialDomain": "@item()?['data']?['credential']?['credential_domain']",
-                                            "DetectionDomain": "@item()?['data']?['credential']?['detection_domain']",
-                                            "Affiliations": "@item()?['data']?['credential']?['affiliations']",
-                                            "PasswordId": "@item()?['data']?['credential']?['password']?['id']",
-                                            "PasswordStrength": "@item()?['data']?['credential']?['password']?['strength']",
-                                            "PasswordLength": "@item()?['data']?['credential']?['password']?['complexity']?['length']",
-                                            "PasswordEntropy": "@item()?['data']?['credential']?['password']?['complexity']?['entropy']",
-                                            "PasswordScore": "@item()?['data']?['credential']?['password']?['complexity']?['score']",
-                                            "PasswordWeakness": "@item()?['data']?['credential']?['password']?['complexity']?['weakness']",
-                                            "PasswordComplexity": "@item()?['data']?['credential']?['password']?['complexity']",
-                                            "AccessedDomain": "@item()?['data']?['accessed_domain']",
-                                            "AccessedUrl": "@item()?['data']?['accessed_url']",
-                                            "CredentialSetId": "@item()?['data']?['credential_set']?['id']",
-                                            "CredentialSetName": "@item()?['data']?['credential_set']?['name']",
-                                            "CredentialType": "@item()?['data']?['credential_type']",
-                                            "FilePath": "@item()?['data']?['file_path']",
-                                            "SoftwareName": "@item()?['data']?['software_name']",
-                                            "MalwareFamily": "@item()?['data']?['info_stealer']?['malware_family']",
-                                            "InfectionTime": "@item()?['data']?['info_stealer']?['infection_ts']",
-                                            "MachineId": "@item()?['data']?['info_stealer']?['machine_id']",
-                                            "PcName": "@item()?['data']?['info_stealer']?['pc_name']",
-                                            "ComputerUsername": "@item()?['data']?['info_stealer']?['computer_username']",
-                                            "SourceIP": "@item()?['data']?['info_stealer']?['ip']",
-                                            "ISP": "@item()?['data']?['info_stealer']?['isp']",
-                                            "OperatingSystem": "@item()?['data']?['info_stealer']?['os']",
-                                            "AntivirusSoftware": "@item()?['data']?['info_stealer']?['antivirus_software']",
-                                            "MalwareInstallPath": "@item()?['data']?['info_stealer']?['malware_install_path']",
-                                            "ScreenshotPath": "@item()?['data']?['info_stealer']?['screenshot_path']",
-                                            "StealerVersion": "@item()?['data']?['info_stealer']?['version']",
-                                            "Girs": "@item()?['classification']?['girs']",
-                                            "SourceSystem": "Intel 471 Verity"
+                                "SourceIsOccurrences": {
+                                    "type": "If",
+                                    "expression": {
+                                        "and": [
+                                            {
+                                                "equals": [
+                                                    "@parameters('RecordType')",
+                                                    "occurrence"
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    "actions": {
+                                        "MapOccurrences": {
+                                            "type": "Select",
+                                            "inputs": {
+                                                "from": "@coalesce(body('Parse_JSON')?[parameters('ResponseFieldItems')], json('[]'))",
+                                                "select": {
+                                                    "TimeGenerated": "@utcNow()",
+                                                    "RecordType": "occurrence",
+                                                    "CredentialId": "@item()?['data']?['credential']?['id']",
+                                                    "OccurrenceId": "@item()?['id']",
+                                                    "LastUpdatedTime": "@item()?['last_updated_ts']",
+                                                    "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
+                                                    "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
+                                                    "CredentialLogin": "@item()?['data']?['credential']?['credential_login']",
+                                                    "AccountName": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential']?['credential_login'], ''))",
+                                                    "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential']?['credential_login'], ''), '@')), '')",
+                                                    "CredentialDomain": "@item()?['data']?['credential']?['credential_domain']",
+                                                    "DetectionDomain": "@item()?['data']?['credential']?['detection_domain']",
+                                                    "Affiliations": "@item()?['data']?['credential']?['affiliations']",
+                                                    "PasswordId": "@item()?['data']?['credential']?['password']?['id']",
+                                                    "PasswordStrength": "@item()?['data']?['credential']?['password']?['strength']",
+                                                    "PasswordLength": "@item()?['data']?['credential']?['password']?['complexity']?['length']",
+                                                    "PasswordEntropy": "@item()?['data']?['credential']?['password']?['complexity']?['entropy']",
+                                                    "PasswordScore": "@item()?['data']?['credential']?['password']?['complexity']?['score']",
+                                                    "PasswordWeakness": "@item()?['data']?['credential']?['password']?['complexity']?['weakness']",
+                                                    "PasswordComplexity": "@item()?['data']?['credential']?['password']?['complexity']",
+                                                    "AccessedDomain": "@item()?['data']?['accessed_domain']",
+                                                    "AccessedUrl": "@item()?['data']?['accessed_url']",
+                                                    "CredentialSets": "@if(empty(coalesce(item()?['data']?['credential_set'], json('{}'))), json('null'), createArray(item()?['data']?['credential_set']))",
+                                                    "CredentialSetId": "@item()?['data']?['credential_set']?['id']",
+                                                    "CredentialSetName": "@item()?['data']?['credential_set']?['name']",
+                                                    "CredentialTypes": "@if(empty(coalesce(item()?['data']?['credential_type'], '')), json('null'), createArray(item()?['data']?['credential_type']))",
+                                                    "FilePath": "@item()?['data']?['file_path']",
+                                                    "SoftwareName": "@item()?['data']?['software_name']",
+                                                    "AccessedDomainsCount": "@json('null')",
+                                                    "MalwareFamily": "@item()?['data']?['info_stealer']?['malware_family']",
+                                                    "InfectionTime": "@item()?['data']?['info_stealer']?['infection_ts']",
+                                                    "MachineId": "@item()?['data']?['info_stealer']?['machine_id']",
+                                                    "PcName": "@item()?['data']?['info_stealer']?['pc_name']",
+                                                    "ComputerUsername": "@item()?['data']?['info_stealer']?['computer_username']",
+                                                    "SourceIP": "@item()?['data']?['info_stealer']?['ip']",
+                                                    "ISP": "@item()?['data']?['info_stealer']?['isp']",
+                                                    "OperatingSystem": "@item()?['data']?['info_stealer']?['os']",
+                                                    "AntivirusSoftware": "@item()?['data']?['info_stealer']?['antivirus_software']",
+                                                    "MalwareInstallPath": "@item()?['data']?['info_stealer']?['malware_install_path']",
+                                                    "ScreenshotPath": "@item()?['data']?['info_stealer']?['screenshot_path']",
+                                                    "StealerVersion": "@item()?['data']?['info_stealer']?['version']",
+                                                    "InfoStealer": "@item()?['data']?['info_stealer']",
+                                                    "Girs": "@item()?['classification']?['girs']",
+                                                    "SourceSystem": "Intel 471 Verity"
+                                                }
+                                            }
+                                        },
+                                        "CollectOccurrences": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "collectedRecords",
+                                                "value": "@body('MapOccurrences')"
+                                            },
+                                            "runAfter": {
+                                                "MapOccurrences": [
+                                                    "Succeeded"
+                                                ]
+                                            }
+                                        }
+                                    },
+                                    "else": {
+                                        "actions": {
+                                            "MapCredentials": {
+                                                "type": "Select",
+                                                "inputs": {
+                                                    "from": "@coalesce(body('Parse_JSON')?[parameters('ResponseFieldItems')], json('[]'))",
+                                                    "select": {
+                                                        "TimeGenerated": "@utcNow()",
+                                                        "RecordType": "credential",
+                                                        "CredentialId": "@item()?['id']",
+                                                        "OccurrenceId": "@json('null')",
+                                                        "LastUpdatedTime": "@item()?['last_updated_ts']",
+                                                        "FirstSeenTime": "@item()?['activity']?['first_seen_ts']",
+                                                        "LastSeenTime": "@item()?['activity']?['last_seen_ts']",
+                                                        "CredentialLogin": "@item()?['data']?['credential_login']",
+                                                        "AccountName": "@if(contains(coalesce(item()?['data']?['credential_login'], ''), '@'), split(coalesce(item()?['data']?['credential_login'], ''), '@')[0], coalesce(item()?['data']?['credential_login'], ''))",
+                                                        "AccountUPNSuffix": "@if(contains(coalesce(item()?['data']?['credential_login'], ''), '@'), last(split(coalesce(item()?['data']?['credential_login'], ''), '@')), '')",
+                                                        "CredentialDomain": "@item()?['data']?['credential_domain']",
+                                                        "DetectionDomain": "@item()?['data']?['detection_domain']",
+                                                        "Affiliations": "@item()?['data']?['affiliations']",
+                                                        "PasswordId": "@item()?['data']?['password']?['id']",
+                                                        "PasswordStrength": "@item()?['data']?['password']?['strength']",
+                                                        "PasswordLength": "@item()?['data']?['password']?['complexity']?['length']",
+                                                        "PasswordEntropy": "@item()?['data']?['password']?['complexity']?['entropy']",
+                                                        "PasswordScore": "@item()?['data']?['password']?['complexity']?['score']",
+                                                        "PasswordWeakness": "@item()?['data']?['password']?['complexity']?['weakness']",
+                                                        "PasswordComplexity": "@item()?['data']?['password']?['complexity']",
+                                                        "AccessedDomain": "@item()?['data']?['accessed_domain']",
+                                                        "AccessedUrl": "@item()?['data']?['accessed_url']",
+                                                        "CredentialSets": "@item()?['data']?['credential_sets']",
+                                                        "CredentialSetId": "@json('null')",
+                                                        "CredentialSetName": "@json('null')",
+                                                        "CredentialTypes": "@item()?['data']?['credential_set_type']",
+                                                        "FilePath": "@json('null')",
+                                                        "SoftwareName": "@json('null')",
+                                                        "AccessedDomainsCount": "@item()?['statistics']?['accessed_domains_count']",
+                                                        "MalwareFamily": "@join(coalesce(item()?['data']?['info_stealer']?['malware_family'], json('[]')), ', ')",
+                                                        "InfectionTime": "@json('null')",
+                                                        "MachineId": "@join(coalesce(item()?['data']?['info_stealer']?['machine_id'], json('[]')), ', ')",
+                                                        "PcName": "@join(coalesce(item()?['data']?['info_stealer']?['pc_name'], json('[]')), ', ')",
+                                                        "ComputerUsername": "@join(coalesce(item()?['data']?['info_stealer']?['computer_username'], json('[]')), ', ')",
+                                                        "SourceIP": "@join(coalesce(item()?['data']?['info_stealer']?['ip'], json('[]')), ', ')",
+                                                        "ISP": "@join(coalesce(item()?['data']?['info_stealer']?['isp'], json('[]')), ', ')",
+                                                        "OperatingSystem": "@join(coalesce(item()?['data']?['info_stealer']?['os'], json('[]')), ', ')",
+                                                        "AntivirusSoftware": "@join(coalesce(item()?['data']?['info_stealer']?['antivirus_software'], json('[]')), ', ')",
+                                                        "MalwareInstallPath": "@join(coalesce(item()?['data']?['info_stealer']?['malware_install_path'], json('[]')), ', ')",
+                                                        "ScreenshotPath": "@join(coalesce(item()?['data']?['info_stealer']?['screenshot_path'], json('[]')), ', ')",
+                                                        "StealerVersion": "@join(coalesce(item()?['data']?['info_stealer']?['version'], json('[]')), ', ')",
+                                                        "InfoStealer": "@item()?['data']?['info_stealer']",
+                                                        "Girs": "@item()?['classification']?['girs']",
+                                                        "SourceSystem": "Intel 471 Verity"
+                                                    }
+                                                }
+                                            },
+                                            "CollectCredentials": {
+                                                "type": "SetVariable",
+                                                "inputs": {
+                                                    "name": "collectedRecords",
+                                                    "value": "@body('MapCredentials')"
+                                                },
+                                                "runAfter": {
+                                                    "MapCredentials": [
+                                                        "Succeeded"
+                                                    ]
+                                                }
+                                            }
                                         }
                                     },
                                     "runAfter": {
@@ -1424,7 +1591,7 @@
                                         "and": [
                                             {
                                                 "equals": [
-                                                    "@not(empty(body('MapOccurrences')))",
+                                                    "@not(empty(variables('collectedRecords')))",
                                                     true
                                                 ]
                                             }
@@ -1439,7 +1606,7 @@
                                                 "headers": {
                                                     "Content-Type": "application/json"
                                                 },
-                                                "body": "@body('MapOccurrences')",
+                                                "body": "@variables('collectedRecords')",
                                                 "authentication": {
                                                     "type": "ManagedServiceIdentity",
                                                     "audience": "https://monitor.azure.com"
@@ -1451,6 +1618,18 @@
                                                     "minimumInterval": "PT5S",
                                                     "maximumInterval": "PT1M"
                                                 }
+                                            }
+                                        },
+                                        "ClearCollectedRecords": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                                "name": "collectedRecords",
+                                                "value": []
+                                            },
+                                            "runAfter": {
+                                                "PostToDcr": [
+                                                    "Succeeded"
+                                                ]
                                             }
                                         },
                                         "SetUploadError": {
@@ -1483,7 +1662,7 @@
                                         "actions": {}
                                     },
                                     "runAfter": {
-                                        "MapOccurrences": [
+                                        "SourceIsOccurrences": [
                                             "Succeeded"
                                         ]
                                     }
@@ -1589,13 +1768,19 @@
                         "value": "[parameters('StorageAccountContainerName')]"
                     },
                     "BlobNameCursor": {
-                        "value": "cursorCredentialsVerity.txt"
+                        "value": "[if(variables('IsOccurrences'), 'cursorCredentialOccurrencesVerity.txt', 'cursorCredentialsVerity.txt')]"
                     },
                     "BlobNameFromDate": {
-                        "value": "fromdateCredentialsVerity.txt"
+                        "value": "[if(variables('IsOccurrences'), 'fromdateCredentialOccurrencesVerity.txt', 'fromdateCredentialsVerity.txt')]"
                     },
                     "ApiURI": {
-                        "value": "https://api.intel471.cloud/integrations/creds/v1/credentials/occurrences/stream"
+                        "value": "[if(variables('IsOccurrences'), 'https://api.intel471.cloud/integrations/creds/v1/credentials/occurrences/stream', 'https://api.intel471.cloud/integrations/creds/v1/credentials/stream')]"
+                    },
+                    "ResponseFieldItems": {
+                        "value": "[if(variables('IsOccurrences'), 'credential_occurrences', 'credentials')]"
+                    },
+                    "RecordType": {
+                        "value": "[if(variables('IsOccurrences'), 'occurrence', 'credential')]"
                     },
                     "UsernameSecretName": {
                         "value": "[if(empty(parameters('KeyVaultUsernameSecretName')), 'VerityUserNameSentinel', parameters('KeyVaultUsernameSecretName'))]"
@@ -1650,6 +1835,10 @@
         "tableName": {
             "type": "String",
             "value": "[variables('TableName')]"
+        },
+        "recordType": {
+            "type": "String",
+            "value": "[if(variables('IsOccurrences'), 'occurrence', 'credential')]"
         }
     }
 }
