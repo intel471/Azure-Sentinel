@@ -105,22 +105,41 @@ Logs Ingestion API rather than through the threat intelligence connector.
 
 ## Getting your Intel 471 API credentials
 
-The playbook authenticates to the Intel 471 API with HTTP Basic authentication. Verity issues an
-**API Client ID** and an **API Client Secret**. There is no separate "user name" or "API key" to look for -
-the Client ID is sent as the Basic user name and the Client Secret as the Basic password. Store them like
-this:
+Credentials are issued from the **Intel 471 Developer Portal** at
+[https://developer.intel471.com/](https://developer.intel471.com/), not from the Verity 471 web application.
 
-| Verity portal value | Key Vault secret (default name) |
-| ------------------- | ------------------------------- |
-| API Client ID       | `VerityUserNameSentinel`        |
-| API Client Secret   | `VerityAPIKeySentinel`          |
+The playbook authenticates to the Intel 471 API with HTTP Basic authentication. The Developer Portal issues
+an **API Client ID** and an **API Client Secret** per application. There is no separate "user name" or "API
+key" to look for - the Client ID is sent as the Basic user name and the Client Secret as the Basic password.
 
-To obtain them, sign in to the Intel 471 portal, open your account/API settings and create an API client.
-Copy the Client Secret at creation time - it is not shown again. If you do not see the option, or the stream
-returns `403`, your subscription may not include Credential Intelligence API access; contact
-[support@intel471.com](mailto:support@intel471.com).
+1. Sign in at [https://developer.intel471.com/](https://developer.intel471.com/).
+2. Create an application, or open the one you already use for Intel 471 integrations.
+3. **Subscribe that application to the Credentials API.** This is the step most easily missed. Credentials
+   are issued per application and access is granted per API, so an application that already works against
+   the Indicators API - for example the one used by the Intel 471 Malware Intelligence playbook - will
+   return `403` against the credential streams until it is subscribed to the Credentials API as well. The
+   Client ID and Secret do not change when you add a subscription.
+4. Copy the Client ID and Client Secret. **The Client Secret is shown only at creation time**, so if you did
+   not record it you will have to issue a new one.
+5. Store them in the Key Vault:
 
-Do not swap the two values - a reversed pair is the most common cause of a `401` from the API.
+    | Developer Portal value | Key Vault secret (default name) |
+    | ---------------------- | ------------------------------- |
+    | API Client ID          | `VerityUserNameSentinel`        |
+    | API Client Secret      | `VerityAPIKeySentinel`          |
+
+These are the same secret names the Intel 471 Malware Intelligence playbook uses, so if one application is
+subscribed to both the Indicators and Credentials APIs, both playbooks can share a single credential pair.
+To keep them separate, store a second pair under different names and pass those names in the
+`KeyVaultUsernameSecretName` and `KeyVaultApiKeySecretName` deployment parameters.
+
+Two failure modes worth recognising:
+
+- **`401`** - the Client ID and Client Secret are swapped, or the secret has been rotated. A reversed pair is
+  the most common cause.
+- **`403`** - the application is not subscribed to the Credentials API, or your subscription does not include
+  Credential Intelligence. Check the subscription in the Developer Portal first; if it is there, contact
+  [support@intel471.com](mailto:support@intel471.com).
 
 ## Choosing the source: credentials or occurrences
 
